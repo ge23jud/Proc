@@ -125,7 +125,7 @@ class AnalysisTab(QWidget):
         r_sel = QHBoxLayout()
         r_sel.addWidget(QLabel("Spectrum:"))
         self._ana_spectrum_sel = QComboBox()
-        self._ana_spectrum_sel.addItems(["maxpeak", "maxsum", "last"])
+        self._ana_spectrum_sel.addItems(["last", "maxpeak", "maxsum"])
         r_sel.addWidget(self._ana_spectrum_sel)
         scl.addLayout(r_sel)
 
@@ -176,47 +176,8 @@ class AnalysisTab(QWidget):
         fitl.addWidget(self._ana_fit_lbl)
         sl.addWidget(g_fit)
 
-        # integrate_spectra group
-        g_int = QGroupBox("3  Integrate spectra")
-        intl = QVBoxLayout(g_int)
-
-        r_ic = QHBoxLayout()
-        r_ic.addWidget(QLabel("Center:"))
-        self._ana_int_center = QLineEdit("1.1")
-        r_ic.addWidget(self._ana_int_center)
-        intl.addLayout(r_ic)
-
-        r_iw = QHBoxLayout()
-        r_iw.addWidget(QLabel("Width:"))
-        self._ana_int_width = QLineEdit("0.25")
-        r_iw.addWidget(self._ana_int_width)
-        intl.addLayout(r_iw)
-
-        r_ist = QHBoxLayout()
-        r_ist.addWidget(QLabel("Spec type:"))
-        self._ana_int_spectype = QComboBox()
-        self._ana_int_spectype.addItems(["no_background", "final", "raw"])
-        r_ist.addWidget(self._ana_int_spectype)
-        intl.addLayout(r_ist)
-
-        r_im = QHBoxLayout()
-        r_im.addWidget(QLabel("Method:"))
-        self._ana_int_method = QComboBox()
-        self._ana_int_method.addItems(["trapz", "sum", "rect"])
-        r_im.addWidget(self._ana_int_method)
-        intl.addLayout(r_im)
-
-        self._ana_btn_int = QPushButton("Integrate")
-        self._ana_btn_int.setEnabled(False)
-        self._ana_btn_int.clicked.connect(self._ana_integrate)
-        intl.addWidget(self._ana_btn_int)
-        self._ana_int_lbl = QLabel("")
-        self._ana_int_lbl.setWordWrap(True)
-        intl.addWidget(self._ana_int_lbl)
-        sl.addWidget(g_int)
-
         # thresholds group
-        g_thr = QGroupBox("4  Find thresholds")
+        g_thr = QGroupBox("3  Find thresholds")
         thrl = QVBoxLayout(g_thr)
         self._ana_thr_area  = QCheckBox("Fit area")
         self._ana_thr_int   = QCheckBox("Integral")
@@ -352,12 +313,10 @@ class AnalysisTab(QWidget):
         )
         self._ana_btn_sc.setEnabled(True)
         self._ana_btn_fit.setEnabled(False)
-        self._ana_btn_int.setEnabled(True)
         self._ana_btn_thr.setEnabled(False)
         self._ana_btn_save.setEnabled(True)
         self._ana_sc_lbl.setText("")
         self._ana_fit_lbl.setText("")
-        self._ana_int_lbl.setText("")
         self._ana_thr_lbl.setText("")
         self._ana_plot_spectrum()
         parent = self.parent()
@@ -721,9 +680,10 @@ class AnalysisTab(QWidget):
         self._ana_btn_thr.setEnabled(True)
         if parent is not None and hasattr(parent, "statusBar"):
             parent.statusBar().showMessage(
-                f"Analysis: fit complete ({n_ok}/{n_total} converged)."
+                f"Analysis: fit complete ({n_ok}/{n_total} converged). Integrating…"
             )
-        self._ana_plot_ll()
+        QApplication.processEvents()
+        self._ana_integrate()
 
     # ── Analysis: integrate_spectra ──────────────────────────────
 
@@ -731,8 +691,8 @@ class AnalysisTab(QWidget):
         nw = self._ana_nw
         if nw is None:
             return
-        spectype = self._ana_int_spectype.currentText()
-        method   = self._ana_int_method.currentText()
+        spectype = "no_background"
+        method   = "trapz"
 
         # Reset specsum so repeated clicks don't accumulate entries.
         nw.specsum = []
@@ -748,7 +708,6 @@ class AnalysisTab(QWidget):
 
             spectra = nw.spectra_raw if spectype == 'raw' else nw.spectra_diff
             if spectra is None:
-                self._ana_int_lbl.setText("No spectra available")
                 return
 
             peak_integral = np.full((n_peaks, n_powers), np.nan)
@@ -760,16 +719,11 @@ class AnalysisTab(QWidget):
                 ref_idx    = int(round(float(nw.start_conditions[2, j])))
                 ref_idx    = max(0, min(ref_idx, n_powers - 1))
 
-                # peakindex[i] = absolute pixel index of the window centre
-                # for power step i.  Seed with the reference step.
                 peakindex = np.zeros(n_powers, dtype=int)
                 peakindex[ref_idx] = center_idx
-                # Seed the first forward step from the reference centre so
-                # the forward pass doesn't start from pixel 0.
                 if ref_idx + 1 < n_powers:
                     peakindex[ref_idx + 1] = center_idx
 
-                # Process backwards from ref, then forwards (MATLAB order).
                 backward = list(range(ref_idx, -1, -1))
                 forward  = list(range(ref_idx + 1, n_powers))
 
@@ -782,26 +736,20 @@ class AnalysisTab(QWidget):
                     wl_seg = wl[i1:i2]
                     y_seg  = spectra[i1:i2, i].astype(float)
 
-                    # Integrate over the window
                     if method == 'sum' or len(wl_seg) < 2:
                         val = float(np.sum(y_seg))
                     elif method == 'trapz':
                         val = float(np.trapz(y_seg, wl_seg))
-                    else:   # rect
+                    else:
                         val = float(np.sum(y_seg * np.gradient(wl_seg)))
                     peak_integral[j, i] = np.nan if val == 0 else val
 
-                    # Track: centre of next window = pixel of argmax in
-                    # current window (equivalent to MATLAB's last_peakindex
-                    # + window_left_edge formula).
                     next_center = i1 + int(np.argmax(y_seg))
-
-                    if 0 < i <= ref_idx:                      # backward pass
+                    if 0 < i <= ref_idx:
                         peakindex[i - 1] = next_center
-                    elif i > ref_idx and i + 1 < n_powers:    # forward pass
+                    elif i > ref_idx and i + 1 < n_powers:
                         peakindex[i + 1] = next_center
 
-                # Build a specsum entry so the L-L plot shows this curve.
                 i1_r = max(0, center_idx - fitwindow // 2)
                 i2_r = min(n_wl - 1, center_idx + fitwindow // 2)
                 nw.specsum.append(dict(
@@ -813,38 +761,11 @@ class AnalysisTab(QWidget):
 
             nw.peak_integral = peak_integral
             n_valid = int(np.sum(~np.isnan(peak_integral)))
-            self._ana_int_lbl.setText(
-                f"Done ({n_peaks} peak(s), tracked)\n"
-                f"{n_valid}/{n_peaks * n_powers} valid"
-            )
-            msg = f"Analysis: integration done over {n_peaks} tracked peak window(s)."
+            msg = (f"Analysis: fit + integration done "
+                   f"({n_peaks} peak(s), {n_valid}/{n_peaks * n_powers} valid).")
 
         else:
-            # ── Fallback: single fixed window from UI fields ─────────
-            try:
-                center = float(self._ana_int_center.text())
-                width  = float(self._ana_int_width.text())
-            except ValueError:
-                QMessageBox.warning(self, "Invalid input",
-                                    "Center and Width must be numbers.")
-                return
-            try:
-                values = nwa.integrate_spectra(
-                    nw, center=center, width=width,
-                    spectrumtype=spectype, method=method
-                )
-            except Exception as exc:
-                QMessageBox.critical(self, "integrate_spectra error", str(exc))
-                return
-            if values is None:
-                self._ana_int_lbl.setText("No spectra available")
-                return
-            n_valid = int(np.sum(~np.isnan(values)))
-            self._ana_int_lbl.setText(
-                f"Done (center={center:.4g}, width={width:.4g})\n"
-                f"{n_valid}/{len(values)} valid"
-            )
-            msg = f"Analysis: integration done at {center:.4g} ± {width/2:.4g}."
+            msg = "Analysis: integration skipped (no start conditions)."
 
         self._ana_btn_thr.setEnabled(True)
         parent = self.parent()
