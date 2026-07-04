@@ -163,7 +163,7 @@ class AnalysisTab(QWidget):
         r_bg = QHBoxLayout()
         r_bg.addWidget(QLabel("Background:"))
         self._ana_fitbg = QComboBox()
-        self._ana_fitbg.addItems(["none", "linear", "constant", "raw"])
+        self._ana_fitbg.addItems(["linear", "none", "constant", "raw"])
         r_bg.addWidget(self._ana_fitbg)
         fitl.addLayout(r_bg)
 
