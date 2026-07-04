@@ -244,6 +244,11 @@ class AnalysisTab(QWidget):
         btn_plot_ll.clicked.connect(self._ana_plot_ll)
         sl.addWidget(btn_plot_ll)
 
+        self._ana_btn_save = QPushButton("Save results to HDF5")
+        self._ana_btn_save.setEnabled(False)
+        self._ana_btn_save.clicked.connect(self._ana_save)
+        sl.addWidget(self._ana_btn_save)
+
         sl.addStretch(1)
         scroll.setWidget(sidebar_content)
         layout.addWidget(scroll)
@@ -349,6 +354,7 @@ class AnalysisTab(QWidget):
         self._ana_btn_fit.setEnabled(False)
         self._ana_btn_int.setEnabled(True)
         self._ana_btn_thr.setEnabled(False)
+        self._ana_btn_save.setEnabled(True)
         self._ana_sc_lbl.setText("")
         self._ana_fit_lbl.setText("")
         self._ana_int_lbl.setText("")
@@ -641,6 +647,9 @@ class AnalysisTab(QWidget):
 
         nw.start_conditions = sc
         nw.n_sel_peaks      = n
+        # Store the (xmin, xmax) bounds in display units so _ana_integrate
+        # can use them instead of the manual center/width fields.
+        nw.fit_windows = list(self._ana_sc_windows)
 
         self._ana_sc_lbl.setText(f"{n} peak(s) selected")
         self._ana_btn_fit.setEnabled(True)
@@ -722,37 +731,125 @@ class AnalysisTab(QWidget):
         nw = self._ana_nw
         if nw is None:
             return
-        try:
-            center = float(self._ana_int_center.text())
-            width  = float(self._ana_int_width.text())
-        except ValueError:
-            QMessageBox.warning(self, "Invalid input",
-                                "Center and Width must be numbers.")
-            return
         spectype = self._ana_int_spectype.currentText()
         method   = self._ana_int_method.currentText()
-        try:
-            values = nwa.integrate_spectra(
-                nw, center=center, width=width,
-                spectrumtype=spectype, method=method
+
+        # Reset specsum so repeated clicks don't accumulate entries.
+        nw.specsum = []
+
+        if nw.start_conditions is not None:
+            # ── Per-peak tracking path (mirrors MATLAB fit_nw) ───────
+            # Window width is fixed per peak; center follows the peak as
+            # it shifts spectrally across power steps.
+            n_peaks  = nw.n_sel_peaks
+            n_wl     = nw.wavelength.shape[0]
+            n_powers = len(nw.power)
+            wl       = nw.wavelength  # nm, shape (n_wl,)
+
+            spectra = nw.spectra_raw if spectype == 'raw' else nw.spectra_diff
+            if spectra is None:
+                self._ana_int_lbl.setText("No spectra available")
+                return
+
+            peak_integral = np.full((n_peaks, n_powers), np.nan)
+
+            for j in range(n_peaks):
+                center_idx = int(round(float(nw.start_conditions[0, j])))
+                fitwindow  = int(round(float(nw.start_conditions[1, j])))
+                fitwindow  = max(2 * (fitwindow // 2), 2)   # keep even, min 2
+                ref_idx    = int(round(float(nw.start_conditions[2, j])))
+                ref_idx    = max(0, min(ref_idx, n_powers - 1))
+
+                # peakindex[i] = absolute pixel index of the window centre
+                # for power step i.  Seed with the reference step.
+                peakindex = np.zeros(n_powers, dtype=int)
+                peakindex[ref_idx] = center_idx
+                # Seed the first forward step from the reference centre so
+                # the forward pass doesn't start from pixel 0.
+                if ref_idx + 1 < n_powers:
+                    peakindex[ref_idx + 1] = center_idx
+
+                # Process backwards from ref, then forwards (MATLAB order).
+                backward = list(range(ref_idx, -1, -1))
+                forward  = list(range(ref_idx + 1, n_powers))
+
+                for i in backward + forward:
+                    i1 = max(0, peakindex[i] - fitwindow // 2)
+                    i2 = min(n_wl, peakindex[i] + fitwindow // 2)
+                    if i2 <= i1:
+                        continue
+
+                    wl_seg = wl[i1:i2]
+                    y_seg  = spectra[i1:i2, i].astype(float)
+
+                    # Integrate over the window
+                    if method == 'sum' or len(wl_seg) < 2:
+                        val = float(np.sum(y_seg))
+                    elif method == 'trapz':
+                        val = float(np.trapz(y_seg, wl_seg))
+                    else:   # rect
+                        val = float(np.sum(y_seg * np.gradient(wl_seg)))
+                    peak_integral[j, i] = np.nan if val == 0 else val
+
+                    # Track: centre of next window = pixel of argmax in
+                    # current window (equivalent to MATLAB's last_peakindex
+                    # + window_left_edge formula).
+                    next_center = i1 + int(np.argmax(y_seg))
+
+                    if 0 < i <= ref_idx:                      # backward pass
+                        peakindex[i - 1] = next_center
+                    elif i > ref_idx and i + 1 < n_powers:    # forward pass
+                        peakindex[i + 1] = next_center
+
+                # Build a specsum entry so the L-L plot shows this curve.
+                i1_r = max(0, center_idx - fitwindow // 2)
+                i2_r = min(n_wl - 1, center_idx + fitwindow // 2)
+                nw.specsum.append(dict(
+                    values=peak_integral[j, :].copy(),
+                    center=float(wl[center_idx]) if 0 <= center_idx < n_wl else 0.0,
+                    width=float(abs(wl[i2_r] - wl[i1_r])) if i2_r > i1_r else 0.0,
+                    spectrumtype=spectype,
+                ))
+
+            nw.peak_integral = peak_integral
+            n_valid = int(np.sum(~np.isnan(peak_integral)))
+            self._ana_int_lbl.setText(
+                f"Done ({n_peaks} peak(s), tracked)\n"
+                f"{n_valid}/{n_peaks * n_powers} valid"
             )
-        except Exception as exc:
-            QMessageBox.critical(self, "integrate_spectra error", str(exc))
-            return
-        if values is None:
-            self._ana_int_lbl.setText("No spectra available")
-            return
-        n_valid = int(np.sum(~np.isnan(values)))
-        self._ana_int_lbl.setText(
-            f"Done (center={center:.4g}, width={width:.4g})\n"
-            f"{n_valid}/{len(values)} valid"
-        )
+            msg = f"Analysis: integration done over {n_peaks} tracked peak window(s)."
+
+        else:
+            # ── Fallback: single fixed window from UI fields ─────────
+            try:
+                center = float(self._ana_int_center.text())
+                width  = float(self._ana_int_width.text())
+            except ValueError:
+                QMessageBox.warning(self, "Invalid input",
+                                    "Center and Width must be numbers.")
+                return
+            try:
+                values = nwa.integrate_spectra(
+                    nw, center=center, width=width,
+                    spectrumtype=spectype, method=method
+                )
+            except Exception as exc:
+                QMessageBox.critical(self, "integrate_spectra error", str(exc))
+                return
+            if values is None:
+                self._ana_int_lbl.setText("No spectra available")
+                return
+            n_valid = int(np.sum(~np.isnan(values)))
+            self._ana_int_lbl.setText(
+                f"Done (center={center:.4g}, width={width:.4g})\n"
+                f"{n_valid}/{len(values)} valid"
+            )
+            msg = f"Analysis: integration done at {center:.4g} ± {width/2:.4g}."
+
         self._ana_btn_thr.setEnabled(True)
         parent = self.parent()
         if parent is not None and hasattr(parent, "statusBar"):
-            parent.statusBar().showMessage(
-                f"Analysis: integration done at {center:.4g} ± {width/2:.4g}."
-            )
+            parent.statusBar().showMessage(msg)
         self._ana_plot_ll()
 
     # ── Analysis: thresholds (native Qt version) ─────────────────
@@ -915,22 +1012,47 @@ class AnalysisTab(QWidget):
                 parent.statusBar().showMessage("Not enough points for fit.")
             return
 
-        coeffs = np.polyfit(p_sel, v_sel, 1)
-        thresh = -coeffs[1] / coeffs[0] if coeffs[0] != 0 else np.nan
+        if len(p_sel) >= 3:
+            coeffs, pcov_fit = np.polyfit(p_sel, v_sel, 1, cov=True)
+            a, b = float(coeffs[0]), float(coeffs[1])
+            sigma_a = float(np.sqrt(pcov_fit[0, 0]))
+            sigma_b = float(np.sqrt(pcov_fit[1, 1]))
+            if a != 0:
+                # Error propagation: T = -b/a, dT/da = b/a², dT/db = -1/a
+                thr_err   = 2.0 * float(np.sqrt((sigma_b / a)**2 + (sigma_a * b / a**2)**2))
+            else:
+                thr_err   = np.nan
+            slope_err = 2.0 * sigma_a
+        else:
+            coeffs    = np.polyfit(p_sel, v_sel, 1)
+            a, b      = float(coeffs[0]), float(coeffs[1])
+            thr_err   = np.nan
+            slope_err = np.nan
+
+        thresh = -b / a if a != 0 else np.nan
         self._ana_thr_coeffs = coeffs
-        self._ana_thr_results[self._ana_thr_title] = (thresh, coeffs[0])
+        self._ana_thr_results[self._ana_thr_title] = {
+            "threshold":     thresh,
+            "threshold_err": thr_err,
+            "slope":         a,
+            "slope_err":     slope_err,
+            "intercept":     b,
+            "sel_power":     p_sel.tolist(),
+            "sel_values":    v_sel.tolist(),
+        }
 
         # Redraw with fit line
         ax = self._ana_canvas.ax
         x_fit = np.linspace(0, max(p_all) * 1.1, 200)
         ax.plot(x_fit, np.polyval(coeffs, x_fit), "r-", lw=1.5, label="fit")
         if not np.isnan(thresh):
+            err_str = f" ± {thr_err:.2g}" if not np.isnan(thr_err) else ""
             ax.axvline(thresh, color="black", lw=1.2, linestyle="--",
-                       label=f"Threshold = {thresh:.4g} mW")
+                       label=f"Threshold = {thresh:.4g}{err_str} mW")
         ax.legend(fontsize=8)
         ax.set_title(
             f"{self._ana_thr_title}\n"
-            f"Threshold = {thresh:.4g} mW  |  slope = {coeffs[0]:.3g}"
+            f"Threshold = {thresh:.4g} mW  |  slope = {a:.3g}"
         )
         self._ana_canvas.fig.tight_layout()
         self._ana_canvas.draw_idle()
@@ -970,8 +1092,11 @@ class AnalysisTab(QWidget):
         # Store results back into nw
         nw = self._ana_nw
         results = self._ana_thr_results
+        nw.thr_results = results   # persist full data for Save
         parts = []
-        for title, (thr, slope) in results.items():
+        for title, data in results.items():
+            thr   = data["threshold"]
+            slope = data["slope"]
             if not np.isnan(thr):
                 parts.append(f"{title}: {thr:.4g} mW")
                 # Try to map into nw fields by title prefix
@@ -1049,3 +1174,219 @@ class AnalysisTab(QWidget):
 
         self._ana_canvas.fig.tight_layout()
         self._ana_canvas.draw_idle()
+
+    # ── Save results ─────────────────────────────────────────────
+
+    def _ana_save(self):
+        nw = self._ana_nw
+        if nw is None or self._ana_file is None:
+            return
+
+        try:
+            with h5py.File(self._ana_file, "a") as f:
+                # Remove stale group, recreate fresh
+                if "analysis" in f:
+                    del f["analysis"]
+                grp = f.create_group("analysis")
+
+                # ── Metadata attributes ───────────────────────────
+                fit_fn = getattr(nw, "fit_function", "gaussian") or "gaussian"
+                grp.attrs["FitFunction"] = fit_fn
+                bg_type = getattr(nw, "background_type", "linear") or "linear"
+                grp.attrs["FitBackground"] = bg_type
+
+                # ── StartConditions ───────────────────────────────
+                if nw.start_conditions is not None:
+                    sc = grp.create_dataset(
+                        "StartConditions", data=np.array(nw.start_conditions, dtype=float)
+                    )
+                    sc.attrs["description"] = (
+                        "3 x n_peaks: [peak_pixel_index, fitwindow_pixels, ref_power_step_idx]"
+                    )
+
+                # ── FitWindows ────────────────────────────────────
+                fw = getattr(nw, "fit_windows", None)
+                if fw is not None:
+                    fw_arr = np.array(fw, dtype=float)
+                    ds = grp.create_dataset("FitWindows", data=fw_arr)
+                    ds.attrs["units"] = "pixels"
+                    ds.attrs["description"] = "Half-window in pixels for each peak"
+
+                # ── PeakArea / PeakAreaErr ────────────────────────
+                def _cell_to_mat_max(cell, n_pk, n_pw):
+                    arr = np.full((n_pk, n_pw), np.nan)
+                    for j, row in enumerate(cell):
+                        for i, val in enumerate(row):
+                            v = np.atleast_1d(val)
+                            if v.size > 0 and not np.all(np.isnan(v)):
+                                arr[j, i] = float(np.nanmax(v))
+                    return arr
+
+                def _cell_to_mat_first(cell, n_pk, n_pw):
+                    arr = np.full((n_pk, n_pw), np.nan)
+                    for j, row in enumerate(cell):
+                        for i, val in enumerate(row):
+                            v = np.atleast_1d(val)
+                            if v.size > 0 and not np.all(np.isnan(v)):
+                                arr[j, i] = float(v[0])
+                    return arr
+
+                pa = getattr(nw, "peak_area", None)
+                if pa is not None:
+                    try:
+                        n_pk = len(pa); n_pw = len(pa[0]) if n_pk > 0 else 0
+                        grp.create_dataset("PeakArea", data=_cell_to_mat_max(pa, n_pk, n_pw))
+                    except Exception:
+                        pass
+
+                pae = getattr(nw, "peak_area_err", None)
+                if pae is not None:
+                    try:
+                        n_pk = len(pae); n_pw = len(pae[0]) if n_pk > 0 else 0
+                        grp.create_dataset("PeakAreaErr", data=_cell_to_mat_max(pae, n_pk, n_pw))
+                    except Exception:
+                        pass
+
+                # ── PeakPos / PeakPosErr ──────────────────────────
+                pp = getattr(nw, "peak_pos", None)
+                if pp is not None:
+                    try:
+                        n_pk = len(pp); n_pw = len(pp[0]) if n_pk > 0 else 0
+                        ds = grp.create_dataset("PeakPos",
+                                                data=_cell_to_mat_first(pp, n_pk, n_pw))
+                        ds.attrs["units"] = "nm"
+                    except Exception:
+                        pass
+
+                ppe = getattr(nw, "peak_pos_err", None)
+                if ppe is not None:
+                    try:
+                        n_pk = len(ppe); n_pw = len(ppe[0]) if n_pk > 0 else 0
+                        ds = grp.create_dataset("PeakPosErr",
+                                                data=_cell_to_mat_first(ppe, n_pk, n_pw))
+                        ds.attrs["units"] = "nm"
+                    except Exception:
+                        pass
+
+                # ── FWHM / FWHMErr ────────────────────────────────
+                fwhm = getattr(nw, "fwhm", None) or getattr(nw, "findpeaks_fwhm", None)
+                if fwhm is not None:
+                    try:
+                        fwhm_arr = np.array(fwhm, dtype=float)
+                        ds = grp.create_dataset("FWHM", data=fwhm_arr)
+                        ds.attrs["units"] = "nm"
+                    except Exception:
+                        pass
+
+                fwhm_e = getattr(nw, "fwhm_err", None)
+                if fwhm_e is not None:
+                    try:
+                        fwhm_e_arr = np.array(fwhm_e, dtype=float)
+                        ds = grp.create_dataset("FWHMErr", data=fwhm_e_arr)
+                        ds.attrs["units"] = "nm"
+                    except Exception:
+                        pass
+
+                # ── FitParameters ─────────────────────────────────
+                fits = getattr(nw, "fits", None)
+                if fits is not None:
+                    fp_grp = grp.create_group("FitParameters")
+                    try:
+                        for j, peak_fits in enumerate(fits):
+                            pk_grp = fp_grp.create_group(f"peak_{j}")
+                            for i, fit_ns in enumerate(peak_fits):
+                                if fit_ns is not None:
+                                    popt = getattr(fit_ns, "popt", fit_ns)
+                                    if popt is not None:
+                                        pk_grp.create_dataset(
+                                            f"power_{i}",
+                                            data=np.atleast_1d(popt).astype(float)
+                                        )
+                    except Exception:
+                        pass
+
+                # ── BackgroundData ────────────────────────────────
+                fit_data = getattr(nw, "fit_data", None)
+                if fit_data is not None:
+                    bg_grp = grp.create_group("BackgroundData")
+                    try:
+                        for j, peak_data in enumerate(fit_data):
+                            pk_grp = bg_grp.create_group(f"peak_{j}")
+                            for i, data_arr in enumerate(peak_data):
+                                if data_arr is not None:
+                                    arr = np.atleast_2d(data_arr)
+                                    if arr.shape[1] >= 3:
+                                        pk_grp.create_dataset(f"power_{i}", data=arr[:, 2])
+                    except Exception:
+                        pass
+
+                # ── PeakIntegral ──────────────────────────────────
+                pi = getattr(nw, "peak_integral", None)
+                if pi is not None:
+                    grp.create_dataset("PeakIntegral", data=np.array(pi, dtype=float))
+
+                # ── Specsum ───────────────────────────────────────
+                specsum = getattr(nw, "specsum", None)
+                if specsum:
+                    ss_grp = grp.create_group("Specsum")
+                    for k, entry in enumerate(specsum):
+                        e_grp = ss_grp.create_group(str(k))
+                        vals  = np.array(entry.get("values", []), dtype=float)
+                        e_grp.create_dataset("values", data=vals)
+                        e_grp.attrs["center"]      = float(entry.get("center", np.nan))
+                        e_grp.attrs["width"]       = float(entry.get("width", np.nan))
+                        e_grp.attrs["spectrumtype"] = str(entry.get("spectype", ""))
+
+                # ── Thresholds ────────────────────────────────────
+                thr_results = getattr(nw, "thr_results", None)
+                if thr_results:
+                    thr_grp  = grp.create_group("Thresholds")
+                    spot_r   = getattr(nw, "spot_radius_short", None)
+                    rep_rate = getattr(nw, "rep_rate", None)
+                    for title, data in thr_results.items():
+                        tg      = thr_grp.create_group(title)
+                        thr_mW  = data.get("threshold", np.nan)
+                        slope   = data.get("slope",     np.nan)
+                        intcpt  = data.get("intercept", np.nan)
+                        p_sel   = np.array(data.get("sel_power",  []), dtype=float)
+                        v_sel   = np.array(data.get("sel_values", []), dtype=float)
+
+                        thr_err_mW  = data.get("threshold_err", np.nan)
+                        slope_err   = data.get("slope_err",     np.nan)
+
+                        if (spot_r is not None and rep_rate is not None
+                                and not np.isnan(thr_mW)
+                                and float(rep_rate) > 0 and float(spot_r) > 0):
+                            import math
+                            d_cm = 2.0 * float(spot_r) * 1e-4
+                            P_W  = float(thr_mW) * 1e-3
+                            f_Hz = float(rep_rate)
+                            conv = 4.0 / f_Hz / math.pi / d_cm**2 * 1e6  # mW→µJ/cm²
+                            thr_fluence = conv * P_W
+                            tg.attrs["Threshold"]      = thr_fluence
+                            tg.attrs["ThresholdUnits"] = "uJ/cm^2"
+                            if not np.isnan(thr_err_mW):
+                                tg.attrs["ThresholdErr"] = conv * float(thr_err_mW) * 1e-3
+                            else:
+                                tg.attrs["ThresholdErr"] = np.nan
+                        else:
+                            tg.attrs["Threshold"]      = thr_mW
+                            tg.attrs["ThresholdUnits"] = "mW"
+                            tg.attrs["ThresholdErr"]   = thr_err_mW
+
+                        tg.attrs["slope"]     = slope
+                        tg.attrs["slope_err"] = slope_err if not np.isnan(slope_err) else np.nan
+                        tg.attrs["intercept"] = intcpt
+                        if p_sel.size:
+                            tg.create_dataset("FitIntervalPower",  data=p_sel)
+                        if v_sel.size:
+                            tg.create_dataset("FitIntervalValues", data=v_sel)
+
+        except Exception as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            return
+
+        QMessageBox.information(
+            self, "Saved",
+            f"Analysis results written to\n{os.path.basename(self._ana_file)}"
+        )
