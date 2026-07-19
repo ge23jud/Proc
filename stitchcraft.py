@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PL Spectrum Stitcher / Converter — entry point.
-Run:  python proc.py
+Run:  python stitchcraft.py
 """
 import sys
 from PyQt5.QtWidgets import QApplication
