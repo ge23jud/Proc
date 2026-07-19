@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
     QPushButton, QRadioButton, QListWidget, QListWidgetItem,
     QLineEdit, QFileDialog, QMessageBox, QSizePolicy,
-    QAbstractItemView, QFrame,
+    QAbstractItemView, QFrame, QScrollArea, QStyle,
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QFont
@@ -17,7 +17,7 @@ import matplotlib.colors as mcolors
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from canvas import _MplCanvas
+from canvas import _MplCanvas, _COMPACT_BTN_STYLE
 from io_utils import (
     _parse_header_center_disp,
     _write_origin_file,
@@ -69,9 +69,16 @@ class StitchTab(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
-        # ── Left sidebar ──────────────────────────────────────────
+        # ── Left sidebar (scrollable so content is never squeezed or
+        #    overlapping if it doesn't fit the window height) ────────
+        scroll = QScrollArea()
+        # Widen by the scrollbar's own thickness so the 270px content column
+        # keeps its full width instead of being squeezed by the scrollbar.
+        scrollbar_w = scroll.style().pixelMetric(QStyle.PM_ScrollBarExtent)
+        scroll.setFixedWidth(270 + scrollbar_w)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         sidebar = QWidget()
-        sidebar.setFixedWidth(270)
         sl = QVBoxLayout(sidebar)
         sl.setContentsMargins(0, 0, 0, 0)
         sl.setSpacing(6)
@@ -93,6 +100,7 @@ class StitchTab(QWidget):
         for b in (self._btn_add, self._btn_remove, self._btn_clear):
             fb.addWidget(b)
         fl.addLayout(fb)
+        g_files.setStyleSheet(_COMPACT_BTN_STYLE)
         sl.addWidget(g_files)
 
         # X-axis group
@@ -142,6 +150,7 @@ class StitchTab(QWidget):
         for b in (self._btn_autosearch, self._btn_load_dark, self._btn_clear_dark):
             db.addWidget(b)
         dl.addLayout(db)
+        g_dark.setStyleSheet(_COMPACT_BTN_STYLE)
         sl.addWidget(g_dark)
 
         # Metadata group
@@ -172,7 +181,7 @@ class StitchTab(QWidget):
         self._cal_atbs_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         r_atbs.addWidget(self._cal_atbs_lbl, stretch=1)
         btn_load_atbs = QPushButton("Load…")
-        btn_load_atbs.setFixedWidth(54)
+        btn_load_atbs.setFixedWidth(64)
         btn_load_atbs.clicked.connect(self._on_load_cal_atbs)
         r_atbs.addWidget(btn_load_atbs)
         cl.addLayout(r_atbs)
@@ -184,7 +193,7 @@ class StitchTab(QWidget):
         self._cal_atsample_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         r_ats.addWidget(self._cal_atsample_lbl, stretch=1)
         btn_load_ats = QPushButton("Load…")
-        btn_load_ats.setFixedWidth(54)
+        btn_load_ats.setFixedWidth(64)
         btn_load_ats.clicked.connect(self._on_load_cal_atsample)
         r_ats.addWidget(btn_load_ats)
         cl.addLayout(r_ats)
@@ -192,6 +201,7 @@ class StitchTab(QWidget):
         btn_cal_auto = QPushButton("Autosearch")
         btn_cal_auto.clicked.connect(self._on_autosearch_cal)
         cl.addWidget(btn_cal_auto)
+        g_cal.setStyleSheet(_COMPACT_BTN_STYLE)
         sl.addWidget(g_cal)
 
         # Action buttons
@@ -222,7 +232,8 @@ class StitchTab(QWidget):
             b.setMinimumHeight(32)
             sl.addWidget(b)
 
-        layout.addWidget(sidebar)
+        scroll.setWidget(sidebar)
+        layout.addWidget(scroll)
 
         # ── Right: canvas ─────────────────────────────────────────
         right = QWidget()

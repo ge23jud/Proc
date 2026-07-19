@@ -15,7 +15,7 @@ import matplotlib.colors as mcolors
 from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from canvas import _MplCanvas
+from canvas import _MplCanvas, _COMPACT_BTN_STYLE
 
 _PL_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "PL Helper")
@@ -61,6 +61,7 @@ class VisualizerTab(QWidget):
         for b in (self._vis_btn_add, self._vis_btn_remove, self._vis_btn_clear):
             fb.addWidget(b)
         fl.addLayout(fb)
+        g_files.setStyleSheet(_COMPACT_BTN_STYLE)
         sl.addWidget(g_files)
 
         # Powers group

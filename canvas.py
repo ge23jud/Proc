@@ -2,6 +2,14 @@ from PyQt5.QtWidgets import QSizePolicy
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
+# Compact QPushButton style for tightly-packed button rows (e.g. 3-across
+# toolbar rows in a narrow sidebar). Styles such as qt_material apply large
+# padding/min-width to QPushButton that clips the label text in these rows;
+# this override keeps the label readable without affecting other buttons.
+_COMPACT_BTN_STYLE = (
+    "QPushButton { padding: 2px 4px; min-width: 0px; min-height: 20px; }"
+)
+
 
 class _MplCanvas(FigureCanvasQTAgg):
     def __init__(self, parent=None):
