@@ -11,13 +11,12 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor, QFont
-from matplotlib.widgets import SpanSelector
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from canvas import _MplCanvas, _COMPACT_BTN_STYLE
+from plotting import (
+    PGCanvas, _COMPACT_BTN_STYLE, MultiLinePlotter, CategoricalScheme,
+    SequentialScheme, PLASMA, GradientLegend, DraggableSpan, make_pg_toolbar,
+)
 from io_utils import (
     _parse_header_center_disp,
     _write_origin_file,
@@ -241,8 +240,8 @@ class StitchTab(QWidget):
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(4)
 
-        self._canvas  = _MplCanvas(right)
-        self._toolbar = NavigationToolbar2QT(self._canvas, right)
+        self._canvas  = PGCanvas(right)
+        self._toolbar = make_pg_toolbar(self._canvas, right)
         rl.addWidget(self._toolbar)
         rl.addWidget(self._canvas, stretch=1)
 
@@ -763,20 +762,17 @@ class StitchTab(QWidget):
         subtitle = f"dark-subtracted: {n_dark}/{len(ds_plot)}" if n_dark else "raw"
 
         ax = self._canvas.reset_axes()
-        ax.set_axis_on()
-        cmap_fn = cm.get_cmap("tab10")
+        ax.addLegend(labelTextSize="7pt")
+        mlp = MultiLinePlotter(ax, CategoricalScheme())
         for k, d in enumerate(ds_plot):
             x   = self._wl_to_x(d["wl"])
             idx = np.argsort(x)
-            ax.plot(x[idx], d["counts"][idx, -1],
-                    lw=1.3, color=cmap_fn(k % 10),
-                    label=f"{d['label']}  ({d['powers'][-1] * 1e3:.3g} mW)")
-        ax.set_xlabel("Energy (eV)" if self._x_axis == "energy" else "Wavelength (nm)")
-        ax.set_ylabel("Counts")
-        ax.legend(fontsize=7, loc="best")
-        ax.grid(True, alpha=0.3)
-        ax.set_title(f"Last-power spectra (preview — {subtitle})")
-        self._canvas.fig.tight_layout()
+            mlp.plot(x[idx], d["counts"][idx, -1], index=k, width=1.3,
+                     label=f"{d['label']}  ({d['powers'][-1] * 1e3:.3g} mW)")
+        ax.setLabel("bottom", "Energy (eV)" if self._x_axis == "energy" else "Wavelength (nm)")
+        ax.setLabel("left", "Counts")
+        ax.showGrid(x=True, y=True, alpha=0.3)
+        ax.setTitle(f"Last-power spectra (preview — {subtitle})")
         self._canvas.draw_idle()
 
     # ── Step 2 — Select spans ────────────────────────────────────
@@ -808,54 +804,46 @@ class StitchTab(QWidget):
         a, b = self._datasets[i_a], self._datasets[i_b]
 
         if self._span_selector is not None:
-            try:
-                self._span_selector.set_active(False)
-            except Exception:
-                pass
+            self._span_selector.deactivate()
             self._span_selector = None
 
         ds_sub, _ = self._apply_dark([a, b])
         a_plot, b_plot = ds_sub
 
         ax = self._canvas.reset_axes()
-        ax.set_axis_on()
-        for d, color in zip((a_plot, b_plot), ("tab:blue", "tab:orange")):
+        ax.addLegend(labelTextSize="8pt")
+        mlp = MultiLinePlotter(ax, CategoricalScheme())
+        for k, d in enumerate((a_plot, b_plot)):
             mask = (d["wl"] >= ov_lo_wl) & (d["wl"] <= ov_hi_wl)
             x_ov = self._wl_to_x(d["wl"][mask])
             c_ov = d["counts"][mask, -1]
             s    = np.argsort(x_ov)
-            ax.plot(x_ov[s], c_ov[s], lw=1.4, color=color, label=d["label"])
+            mlp.plot(x_ov[s], c_ov[s], index=k, width=1.4, label=d["label"])
 
         x_lo = self._wl_to_x(ov_hi_wl if self._x_axis == "energy" else ov_lo_wl)
         x_hi = self._wl_to_x(ov_lo_wl if self._x_axis == "energy" else ov_hi_wl)
         if x_lo > x_hi:
             x_lo, x_hi = x_hi, x_lo
-        ax.set_xlim(x_lo, x_hi)
-        ax.set_xlabel("Energy (eV)" if self._x_axis == "energy" else "Wavelength (nm)")
-        ax.set_ylabel("Counts")
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax.set_title(
+        ax.setXRange(x_lo, x_hi, padding=0)
+        ax.setLabel("bottom", "Energy (eV)" if self._x_axis == "energy" else "Wavelength (nm)")
+        ax.setLabel("left", "Counts")
+        ax.showGrid(x=True, y=True, alpha=0.3)
+        ax.setTitle(
             f"Pair {idx + 1}/{len(self._pairs)}: {a['label']}  ↔  {b['label']}\n"
-            "Drag to select the transition span"
+            "Drag the shaded region's edges to select the transition span"
         )
-        self._canvas.fig.tight_layout()
         self._canvas.draw_idle()
 
         key = (i_a, i_b)
-        if key in self._spans_display:
-            x0, x1 = self._spans_display[key]
-            ax.axvspan(x0, x1, alpha=0.28, color="tab:green", zorder=0)
-            self._canvas.draw_idle()
+        stored = self._spans_display.get(key)
+        mid = (x_lo + x_hi) / 2.0
+        width = (x_hi - x_lo) * 0.1
+        initial = stored if stored is not None else (mid - width / 2, mid + width / 2)
 
-        self._span_selector = SpanSelector(
-            ax,
-            lambda xmin, xmax, _idx=idx: self._on_span_selected(xmin, xmax, _idx),
-            "horizontal",
-            useblit=False,
-            interactive=True,
-            props=dict(facecolor="tab:green", alpha=0.22),
-            handle_props=dict(color="darkgreen"),
+        self._span_selector = DraggableSpan(ax, color=(0, 150, 0, 60), movable=True)
+        self._span_selector.activate(initial_range=initial, bounds=(x_lo, x_hi))
+        self._span_selector.sigRegionSelected.connect(
+            lambda xmin, xmax, _idx=idx: self._on_span_selected(xmin, xmax, _idx)
         )
         self._lbl_pair.setText(f"Pair {idx + 1} of {len(self._pairs)}")
         self._btn_prev.setEnabled(idx > 0)
@@ -902,10 +890,7 @@ class StitchTab(QWidget):
 
     def _on_done_spans(self):
         if self._span_selector is not None:
-            try:
-                self._span_selector.set_active(False)
-            except Exception:
-                pass
+            self._span_selector.deactivate()
             self._span_selector = None
         self._nav_bar.setVisible(False)
         self._mode = "done"
@@ -1135,25 +1120,21 @@ class StitchTab(QWidget):
 
     def _draw_stitched(self, wl_out, counts_out, powers, title="Spectrum"):
         ax = self._canvas.reset_axes()
-        ax.set_axis_on()
-        n_p     = counts_out.shape[1]
-        cmap_fn = cm.get_cmap("plasma", n_p)
-        x       = self._wl_to_x(wl_out)
-        idx     = np.argsort(x)
+        n_p        = counts_out.shape[1]
+        x          = self._wl_to_x(wl_out)
+        idx        = np.argsort(x)
+        vmin, vmax = powers[0] * 1e3, powers[-1] * 1e3
+        mlp = MultiLinePlotter(ax, SequentialScheme(vmin=vmin, vmax=vmax, cmap=PLASMA))
         for p in range(n_p):
-            ax.plot(x[idx], counts_out[idx, p], lw=0.8,
-                    color=cmap_fn(p), alpha=0.85)
-        sm = cm.ScalarMappable(
-            cmap="plasma",
-            norm=mcolors.Normalize(vmin=powers[0] * 1e3, vmax=powers[-1] * 1e3),
+            item = mlp.plot(x[idx], counts_out[idx, p], value=powers[p] * 1e3, width=0.8)
+            item.setOpacity(0.85)
+        self._canvas.add_colorbar_legend(
+            GradientLegend(cmap=PLASMA, vmin=vmin, vmax=vmax, label="Power (mW)")
         )
-        sm.set_array([])
-        self._canvas.fig.colorbar(sm, ax=ax, label="Power (mW)", pad=0.02)
-        ax.set_xlabel("Energy (eV)" if self._x_axis == "energy" else "Wavelength (nm)")
-        ax.set_ylabel("Counts")
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-        self._canvas.fig.tight_layout()
+        ax.setLabel("bottom", "Energy (eV)" if self._x_axis == "energy" else "Wavelength (nm)")
+        ax.setLabel("left", "Counts")
+        ax.setTitle(title)
+        ax.showGrid(x=True, y=True, alpha=0.3)
         self._canvas.draw_idle()
 
     # ── Helpers ──────────────────────────────────────────────────

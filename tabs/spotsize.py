@@ -9,12 +9,13 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-from matplotlib.widgets import SpanSelector
-import matplotlib.patches as mpatches
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
+import pyqtgraph as pg
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from canvas import _MplCanvas
+from plotting import (
+    PGCanvas, MultiLinePlotter, CategoricalScheme, TAB10,
+    DraggableSpan, FilledRegion, MeasurementArrow, make_pg_toolbar,
+)
 
 _PL_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "PL Helper")
@@ -23,6 +24,11 @@ if _PL_DIR not in sys.path:
     sys.path.insert(0, _PL_DIR)
 
 from pl import _HC_EV_NM, _gaussian, _find_symmetric_95_bounds
+
+_SPAN_COLORS = [
+    (*pg.mkColor(TAB10[2]).getRgb()[:3], 60),   # Span 1 — green
+    (*pg.mkColor(TAB10[1]).getRgb()[:3], 60),   # Span 2 — orange
+]
 
 
 class SpotsizeTab(QWidget):
@@ -33,8 +39,7 @@ class SpotsizeTab(QWidget):
         self._ss_x            = None
         self._ss_deriv        = None
         self._ss_spans        = [None, None]
-        self._ss_span_patches = [None, None]
-        self._ss_selector     = None
+        self._ss_span_widgets = [None, None]   # DraggableSpan instances
 
         # ── Build UI (body of original _build_spotsize_tab) ──────
         layout = QHBoxLayout(self)
@@ -72,19 +77,13 @@ class SpotsizeTab(QWidget):
         g_span = QGroupBox("Span selection")
         spl2 = QVBoxLayout(g_span)
         spl2.addWidget(QLabel(
-            "Drag on the plot to select a span.\n"
+            "Drag either shaded region's edges to set its span.\n"
             "Both spans are needed before analysis."
         ))
         r_sp = QHBoxLayout()
         self._ss_rb_span1 = QRadioButton("Span 1")
         self._ss_rb_span2 = QRadioButton("Span 2")
         self._ss_rb_span1.setChecked(True)
-        self._ss_rb_span1.toggled.connect(
-            lambda checked: self._ss_switch_span(0) if checked else None
-        )
-        self._ss_rb_span2.toggled.connect(
-            lambda checked: self._ss_switch_span(1) if checked else None
-        )
         r_sp.addWidget(self._ss_rb_span1)
         r_sp.addWidget(self._ss_rb_span2)
         spl2.addLayout(r_sp)
@@ -127,81 +126,54 @@ class SpotsizeTab(QWidget):
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(4)
-        self._ss_canvas  = _MplCanvas(right)
-        self._ss_toolbar = NavigationToolbar2QT(self._ss_canvas, right)
-        # Replace default welcome text
-        self._ss_canvas.reset_axes()
-        self._ss_canvas.ax.set_axis_off()
-        self._ss_canvas.ax.text(
-            0.5, 0.5, "Load an Excel file to begin.",
-            ha="center", va="center", transform=self._ss_canvas.ax.transAxes,
-            fontsize=12, color="#666666",
-        )
-        self._ss_canvas.draw_idle()
+        self._ss_canvas = PGCanvas(right, welcome_msg="Load an Excel file to begin.")
+        self._ss_toolbar = make_pg_toolbar(self._ss_canvas, right)
         rl.addWidget(self._ss_toolbar)
         rl.addWidget(self._ss_canvas, stretch=1)
         layout.addWidget(right, stretch=1)
 
     # ── Spotsize: helpers ─────────────────────────────────────────
 
+    def _ss_default_span_ranges(self):
+        """Initial (draggable, not-yet-committed) span positions shown when
+        data is first loaded or spans are cleared."""
+        lo, hi = float(self._ss_x.min()), float(self._ss_x.max())
+        width = (hi - lo) * 0.12
+        c1 = lo + (hi - lo) * 0.25
+        c2 = lo + (hi - lo) * 0.75
+        return (c1 - width / 2, c1 + width / 2), (c2 - width / 2, c2 + width / 2)
+
     def _ss_setup_canvas(self):
-        """Plot current derivative on canvas and install a fresh SpanSelector."""
+        """Plot current derivative on canvas and install two draggable spans."""
         ax = self._ss_canvas.reset_axes()
-        ax.plot(self._ss_x, self._ss_deriv, color="tab:blue", lw=1.5)
-        ax.set_xlabel("x")
-        ax.set_ylabel("dy/dx")
-        ax.set_title("Select two spans — one per Gaussian edge")
-        ax.grid(True, alpha=0.4)
+        mlp = MultiLinePlotter(ax, CategoricalScheme())
+        mlp.plot(self._ss_x, self._ss_deriv, index=0, width=1.5)
+        ax.setLabel("bottom", "x")
+        ax.setLabel("left", "dy/dx")
+        ax.setTitle("Drag the shaded regions to select two spans")
+        ax.showGrid(x=True, y=True, alpha=0.4)
 
-        # Reapply existing span patches
-        _SPAN_COLORS = ["tab:green", "tab:orange"]
-        self._ss_span_patches = [None, None]
-        for i, sp in enumerate(self._ss_spans):
-            if sp is not None:
-                xmin, xmax = sp
-                self._ss_span_patches[i] = ax.axvspan(
-                    xmin, xmax, alpha=0.25, color=_SPAN_COLORS[i]
-                )
+        default_ranges = self._ss_default_span_ranges()
+        self._ss_span_widgets = [None, None]
+        for i in range(2):
+            widget = DraggableSpan(ax, color=_SPAN_COLORS[i], movable=True)
+            initial = self._ss_spans[i] if self._ss_spans[i] is not None else default_ranges[i]
+            widget.activate(initial_range=initial)
+            widget.sigRegionSelected.connect(
+                lambda xmin, xmax, idx=i: self._ss_on_span_select(idx, xmin, xmax)
+            )
+            self._ss_span_widgets[i] = widget
 
-        self._ss_canvas.fig.tight_layout()
         self._ss_canvas.draw_idle()
 
-        self._ss_selector = SpanSelector(
-            ax, self._ss_on_span_select, "horizontal", useblit=False,
-            props=dict(alpha=0.15, facecolor="lightyellow"),
-        )
-
-    def _ss_on_span_select(self, xmin, xmax):
-        idx = 0 if self._ss_rb_span1.isChecked() else 1
-        _SPAN_COLORS = ["tab:green", "tab:orange"]
-
-        if self._ss_span_patches[idx] is not None:
-            try:
-                self._ss_span_patches[idx].remove()
-            except ValueError:
-                pass
-
+    def _ss_on_span_select(self, idx, xmin, xmax):
         self._ss_spans[idx] = (xmin, xmax)
-        ax = self._ss_canvas.ax
-        self._ss_span_patches[idx] = ax.axvspan(
-            xmin, xmax, alpha=0.25, color=_SPAN_COLORS[idx]
-        )
         lbls = [self._ss_span1_lbl, self._ss_span2_lbl]
         lbls[idx].setText(f"Span {idx + 1}: [{xmin:.5g}, {xmax:.5g}]")
-
-        # Auto-advance to the other span if unset
-        if idx == 0 and self._ss_spans[1] is None:
-            self._ss_rb_span2.setChecked(True)
-        elif idx == 1 and self._ss_spans[0] is None:
-            self._ss_rb_span1.setChecked(True)
 
         self._ss_canvas.draw_idle()
         if all(s is not None for s in self._ss_spans):
             self._ss_btn_analyze.setEnabled(True)
-
-    def _ss_switch_span(self, idx):
-        """Called when a span radio button is toggled (no-op placeholder)."""
-        pass
 
     # ── Spotsize: actions ─────────────────────────────────────────
 
@@ -244,7 +216,6 @@ class SpotsizeTab(QWidget):
         self._ss_span2_lbl.setText("Span 2: not set")
         self._ss_result_lbl.setText("")
         self._ss_btn_analyze.setEnabled(False)
-        self._ss_rb_span1.setChecked(True)
         self._ss_file_label.setText(
             f"{os.path.basename(path)}\n"
             f"{x.size} points  x = [{x.min():.4g}, {x.max():.4g}]"
@@ -252,18 +223,14 @@ class SpotsizeTab(QWidget):
         self._ss_setup_canvas()
 
     def _ss_clear_spans(self):
-        for i, patch in enumerate(self._ss_span_patches):
-            if patch is not None:
-                try:
-                    patch.remove()
-                except ValueError:
-                    pass
-        self._ss_span_patches = [None, None]
-        self._ss_spans        = [None, None]
+        self._ss_spans = [None, None]
         self._ss_span1_lbl.setText("Span 1: not set")
         self._ss_span2_lbl.setText("Span 2: not set")
         self._ss_btn_analyze.setEnabled(False)
         self._ss_result_lbl.setText("")
+        if self._ss_x is not None and all(w is not None for w in self._ss_span_widgets):
+            for widget, rng in zip(self._ss_span_widgets, self._ss_default_span_ranges()):
+                widget.set_range(*rng)
         self._ss_canvas.draw_idle()
 
     def _ss_analyze(self):
@@ -316,58 +283,58 @@ class SpotsizeTab(QWidget):
 
         # ── Draw result ───────────────────────────────────────────
         ax = self._ss_canvas.reset_axes()
-        ax.plot(x, deriv, color="tab:blue", lw=1.5, label="dy/dx", zorder=3)
-        ax.fill_between(
-            x[bounds_mask], deriv[bounds_mask], alpha=0.30, color="tab:green",
-            label=f"95.4 % area  [{x_lo:.4g}, {x_hi:.4g}]",
+        legend = ax.addLegend(labelTextSize="8pt")
+
+        mlp = MultiLinePlotter(ax, CategoricalScheme())
+        mlp.plot(x, deriv, index=0, label="dy/dx", width=1.5)
+
+        self._ss_fill = FilledRegion(
+            ax, x[bounds_mask], deriv[bounds_mask],
+            brush=(*pg.mkColor(TAB10[2]).getRgb()[:3], 80),
         )
+
         x_fit = np.linspace(x_lo, x_hi, 500)
-        ax.plot(
-            x_fit, _gaussian(x_fit, amp, mu, sigma),
-            "--", color="tab:green", lw=2,
-            label=f"Gaussian  μ={mu:.5g}  σ={sigma:.5g}",
-        )
-        ax.axvline(mu, color="tab:green", lw=1.2, ls=":", zorder=4)
+        fit_pen = pg.mkPen(TAB10[2], width=2, style=Qt.DashLine)
+        ax.plot(x_fit, _gaussian(x_fit, amp, mu, sigma), pen=fit_pen,
+                name=f"Gaussian  μ={mu:.5g}  σ={sigma:.5g}")
 
-        # Arrow annotation
-        y_lo, y_hi = ax.get_ylim()
-        ax.set_ylim(y_lo, y_hi + 0.25 * (y_hi - y_lo))
-        y_lo, y_hi = ax.get_ylim()
-        span_y  = y_hi - y_lo
-        y_arrow = y_hi - 0.08 * span_y
-        ax.annotate(
-            "", xy=(x_hi, y_arrow), xytext=(x_lo, y_arrow),
-            arrowprops=dict(arrowstyle="<->", color="red", lw=2),
-        )
-        ax.text(
-            mu, y_arrow + 0.02 * span_y,
-            f"Δx = {delta:.5g}  |  Δx × sin({angle}°) = {delta_corr:.5g}",
-            ha="center", va="bottom", color="red", fontsize=10, fontweight="bold",
+        mu_line = pg.InfiniteLine(pos=mu, angle=90,
+                                   pen=pg.mkPen(TAB10[2], width=1.2, style=Qt.DotLine))
+        ax.addItem(mu_line)
+
+        # Arrow annotation — placed above the data, in the headroom carved
+        # out below by expanding the y-range by 25%.
+        ax.getViewBox().autoRange()
+        (_x_lo_v, _x_hi_v), (y_lo, y_hi) = ax.getViewBox().viewRange()
+        span_y = y_hi - y_lo
+        new_y_hi = y_hi + 0.25 * span_y
+        ax.setYRange(y_lo, new_y_hi, padding=0)
+        span_y = new_y_hi - y_lo
+        y_arrow = new_y_hi - 0.08 * span_y
+
+        self._ss_arrow = MeasurementArrow(
+            ax, x_lo, x_hi, y_arrow,
+            label=f"Δx = {delta:.5g}  |  Δx × sin({angle}°) = {delta_corr:.5g}",
+            color="r",
         )
 
-        # Reapply span patches on new axes
-        _SPAN_COLORS = ["tab:green", "tab:orange"]
-        self._ss_span_patches = [None, None]
-        for i, sp in enumerate(self._ss_spans):
-            if sp is not None:
-                self._ss_span_patches[i] = ax.axvspan(
-                    sp[0], sp[1], alpha=0.15, color=_SPAN_COLORS[i],
-                    label=f"Span {i + 1}",
-                )
+        # Reapply span regions on the new axes (still draggable; identified by
+        # their color-coded position in the sidebar rather than in the legend —
+        # pyqtgraph's LegendItem doesn't support LinearRegionItem entries).
+        self._ss_span_widgets = [None, None]
+        for i, sp in enumerate(spans):
+            widget = DraggableSpan(ax, color=_SPAN_COLORS[i], movable=True)
+            widget.activate(initial_range=sp)
+            widget.sigRegionSelected.connect(
+                lambda xmin, xmax, idx=i: self._ss_on_span_select(idx, xmin, xmax)
+            )
+            self._ss_span_widgets[i] = widget
 
-        ax.set_xlabel("x")
-        ax.set_ylabel("dy/dx")
-        ax.set_title(f"Δx × sin({angle}°) = {delta_corr:.5g}")
-        ax.legend(fontsize=8)
-        ax.grid(True, alpha=0.4)
-        self._ss_canvas.fig.tight_layout()
+        ax.setLabel("bottom", "x")
+        ax.setLabel("left", "dy/dx")
+        ax.setTitle(f"Δx × sin({angle}°) = {delta_corr:.5g}")
+        ax.showGrid(x=True, y=True, alpha=0.4)
         self._ss_canvas.draw_idle()
-
-        # Reinstall SpanSelector on new axes
-        self._ss_selector = SpanSelector(
-            ax, self._ss_on_span_select, "horizontal", useblit=False,
-            props=dict(alpha=0.15, facecolor="lightyellow"),
-        )
 
         self._ss_result_lbl.setText(
             f"μ = {mu:.6g}\n"

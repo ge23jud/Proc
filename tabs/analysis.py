@@ -10,14 +10,13 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-from matplotlib.widgets import SpanSelector
-from matplotlib.widgets import RectangleSelector
-import matplotlib.colors as mcolors
-import matplotlib.cm as cm
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
+import pyqtgraph as pg
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from canvas import _MplCanvas
+from plotting import (
+    PGCanvas, MultiLinePlotter, SequentialScheme, PLASMA, TAB10, GradientLegend,
+    DraggableSpan, DraggableRect, RecolorableScatter, make_pg_toolbar,
+)
 
 _PL_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "PL Helper")
@@ -219,8 +218,8 @@ class AnalysisTab(QWidget):
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(4)
-        self._ana_canvas  = _MplCanvas(right)
-        self._ana_toolbar = NavigationToolbar2QT(self._ana_canvas, right)
+        self._ana_canvas  = PGCanvas(right)
+        self._ana_toolbar = make_pg_toolbar(self._ana_canvas, right)
         rl.addWidget(self._ana_toolbar)
         rl.addWidget(self._ana_canvas, stretch=1)
 
@@ -342,27 +341,23 @@ class AnalysisTab(QWidget):
         if nw is None:
             return
         ax = self._ana_canvas.reset_axes()
-        ax.set_axis_on()
         wl     = nw.wavelength
         n_p    = nw.spectra_raw.shape[1]
-        cmap_f = cm.get_cmap("plasma", n_p)
         x   = self._ana_x_of_wl(wl)
         s   = np.argsort(x)
+        vmin, vmax = nw.power[0], nw.power[-1]
+        mlp = MultiLinePlotter(ax, SequentialScheme(vmin=vmin, vmax=vmax, cmap=PLASMA))
         for p in range(n_p):
-            ax.plot(x[s], nw.spectra_raw[s, p], lw=0.7,
-                    color=cmap_f(p), alpha=0.8)
-        sm = cm.ScalarMappable(
-            cmap="plasma",
-            norm=mcolors.Normalize(vmin=nw.power[0], vmax=nw.power[-1]),
+            item = mlp.plot(x[s], nw.spectra_raw[s, p], value=nw.power[p], width=0.7)
+            item.setOpacity(0.8)
+        self._ana_canvas.add_colorbar_legend(
+            GradientLegend(cmap=PLASMA, vmin=vmin, vmax=vmax, label="Power (mW)")
         )
-        sm.set_array([])
-        self._ana_canvas.fig.colorbar(sm, ax=ax, label="Power (mW)", pad=0.02)
         x_label = "Energy (eV)" if self._ana_rb_ev.isChecked() else "Wavelength (nm)"
-        ax.set_xlabel(x_label)
-        ax.set_ylabel("Counts")
-        ax.set_title(nw.name)
-        ax.grid(True, alpha=0.3)
-        self._ana_canvas.fig.tight_layout()
+        ax.setLabel("bottom", x_label)
+        ax.setLabel("left", "Counts")
+        ax.setTitle(nw.name)
+        ax.showGrid(x=True, y=True, alpha=0.3)
         self._ana_canvas.draw_idle()
 
     # ── Analysis: peak clicking (phase 1 of set_startconditions) ─
@@ -385,29 +380,23 @@ class AnalysisTab(QWidget):
 
         # Draw reference spectrum
         ax = self._ana_canvas.reset_axes()
-        ax.set_axis_on()
+        ax.setLogMode(y=self._ana_rb_log.isChecked())
         wl   = nw.wavelength
         x    = self._ana_x_of_wl(wl)
         s    = np.argsort(x)
         spec = nw.spectra_raw[:, ref]
-        ax.plot(x[s], spec[s], lw=1.0, color="steelblue")
-        if self._ana_rb_log.isChecked():
-            try:
-                ax.set_yscale("log")
-            except Exception:
-                pass
+        ax.plot(x[s], spec[s], pen=pg.mkPen("steelblue", width=1.0))
         x_label = "Energy (eV)" if self._ana_rb_ev.isChecked() else "Wavelength (nm)"
-        ax.set_xlabel(x_label)
-        ax.set_ylabel("Counts")
-        ax.set_title(f"{nw.name} — left-click peaks, then ✓ Done")
-        ax.grid(True, alpha=0.3)
-        self._ana_canvas.fig.tight_layout()
+        ax.setLabel("bottom", x_label)
+        ax.setLabel("left", "Counts")
+        ax.setTitle(f"{nw.name} — left-click peaks, then ✓ Done")
+        ax.showGrid(x=True, y=True, alpha=0.3)
         self._ana_canvas.draw_idle()
 
         # Connect click handler
-        self._ana_sc_clicks_x = []  # x-positions (canvas units)
-        self._ana_sc_click_conn = self._ana_canvas.mpl_connect(
-            "button_press_event", self._ana_on_peak_click
+        self._ana_sc_clicks_x = []  # x-positions (data units)
+        self._ana_sc_click_conn = self._ana_canvas.sigDataClicked.connect(
+            self._ana_on_peak_click
         )
         self._ana_mode = "sc_click_peaks"
 
@@ -425,33 +414,30 @@ class AnalysisTab(QWidget):
                 "Left-click peak positions in the plot, then click ✓ Done."
             )
 
-    def _ana_on_peak_click(self, event):
-        if event.inaxes is None or event.button != 1:
+    def _ana_on_peak_click(self, x, y, button):
+        if button != Qt.LeftButton:
             return
         if self._ana_mode != "sc_click_peaks":
             return
-        x_click = event.xdata
-        self._ana_sc_clicks_x.append(x_click)
+        self._ana_sc_clicks_x.append(x)
         n = len(self._ana_sc_clicks_x)
         self._ana_action_lbl.setText(f"{n} peak(s) selected")
         # Mark the click on the canvas
-        ax = self._ana_canvas.ax
-        ax.axvline(x_click, color="red", lw=1.0, linestyle="--", alpha=0.7)
+        line = pg.InfiniteLine(pos=x, angle=90,
+                                pen=pg.mkPen("red", width=1.0, style=Qt.DashLine))
+        self._ana_canvas.plot_item.addItem(line)
         self._ana_canvas.draw_idle()
 
     def _ana_sc_cleanup(self):
-        """Disconnect any active click handler or SpanSelector."""
+        """Disconnect any active click handler or DraggableSpan."""
         if self._ana_sc_click_conn is not None:
             try:
-                self._ana_canvas.mpl_disconnect(self._ana_sc_click_conn)
-            except Exception:
+                self._ana_canvas.sigDataClicked.disconnect(self._ana_on_peak_click)
+            except (TypeError, RuntimeError):
                 pass
             self._ana_sc_click_conn = None
         if self._ana_sc_span is not None:
-            try:
-                self._ana_sc_span.set_active(False)
-            except Exception:
-                pass
+            self._ana_sc_span.deactivate()
             self._ana_sc_span = None
 
     def _ana_done_clicking_peaks(self):
@@ -493,37 +479,31 @@ class AnalysisTab(QWidget):
         x_hi = x_peak + window_half * 3
 
         ax = self._ana_canvas.reset_axes()
-        ax.set_axis_on()
+        ax.setLogMode(y=self._ana_rb_log.isChecked())
         mask = (x[s] >= x_lo) & (x[s] <= x_hi)
-        ax.plot(x[s][mask], spec[s][mask], "x-", lw=1.0, color="steelblue")
-        if self._ana_rb_log.isChecked():
-            try:
-                ax.set_yscale("log")
-            except Exception:
-                pass
+        ax.plot(x[s][mask], spec[s][mask], pen=pg.mkPen("steelblue", width=1.0),
+                symbol="x", symbolSize=6, symbolPen="steelblue", symbolBrush="steelblue")
         x_label = "Energy (eV)" if self._ana_rb_ev.isChecked() else "Wavelength (nm)"
-        ax.set_xlabel(x_label)
-        ax.set_ylabel("Counts")
+        ax.setLabel("bottom", x_label)
+        ax.setLabel("left", "Counts")
         n_tot = len(self._ana_sc_clicks_x)
-        ax.set_title(
+        ax.setTitle(
             f"{nw.name} — peak {j+1}/{n_tot}\n"
-            "Drag to select fit window, then Confirm"
+            "Drag the shaded region's edges to select fit window, then Confirm"
         )
-        ax.grid(True, alpha=0.3)
-        ax.set_xlim(x_lo, x_hi)
-        self._ana_canvas.fig.tight_layout()
+        ax.showGrid(x=True, y=True, alpha=0.3)
+        ax.setXRange(x_lo, x_hi, padding=0)
         self._ana_canvas.draw_idle()
 
-        # SpanSelector
+        # DraggableSpan (SpanSelector replacement)
         self._ana_sc_span_sel = [None]  # stores (xmin, xmax)
-        self._ana_sc_span = SpanSelector(
-            ax,
-            lambda xmin, xmax: self._ana_sc_span_sel.__setitem__(0, (xmin, xmax)),
-            "horizontal",
-            useblit=False,
-            interactive=True,
-            props=dict(facecolor="tab:green", alpha=0.22),
-            handle_props=dict(color="darkgreen"),
+        self._ana_sc_span = DraggableSpan(ax, color=(0, 150, 0, 60), movable=True)
+        self._ana_sc_span.activate(
+            initial_range=(x_peak - window_half, x_peak + window_half),
+            bounds=(x_lo, x_hi),
+        )
+        self._ana_sc_span.sigRegionSelected.connect(
+            lambda xmin, xmax: self._ana_sc_span_sel.__setitem__(0, (xmin, xmax))
         )
 
         n_done = j
@@ -625,23 +605,24 @@ class AnalysisTab(QWidget):
         if nw is None or nw.start_conditions is None:
             return
         ax = self._ana_canvas.reset_axes()
-        ax.set_axis_on()
         wl  = nw.wavelength
         x   = self._ana_x_of_wl(wl)
         s   = np.argsort(x)
         ref = int(nw.start_conditions[2, 0])
-        ax.plot(x[s], nw.spectra_raw[s, ref], lw=1.0, color="steelblue")
+        ax.plot(x[s], nw.spectra_raw[s, ref], pen=pg.mkPen("steelblue", width=1.0))
         for k in range(nw.n_sel_peaks):
             pi = int(nw.start_conditions[0, k])
-            ax.axvline(x[pi], color="red", lw=1.0, linestyle="--",
-                       label=f"peak {k+1}: {x[pi]:.4g}")
+            line = pg.InfiniteLine(
+                pos=x[pi], angle=90, pen=pg.mkPen("red", width=1.0, style=Qt.DashLine),
+                label=f"peak {k+1}: {x[pi]:.4g}",
+                labelOpts={"position": max(0.05, 0.9 - 0.08 * k), "color": (200, 60, 60)},
+            )
+            ax.addItem(line)
         x_label = "Energy (eV)" if self._ana_rb_ev.isChecked() else "Wavelength (nm)"
-        ax.set_xlabel(x_label)
-        ax.set_ylabel("Counts")
-        ax.set_title(f"{nw.name} — {nw.n_sel_peaks} selected peak(s)")
-        ax.legend(fontsize=7)
-        ax.grid(True, alpha=0.3)
-        self._ana_canvas.fig.tight_layout()
+        ax.setLabel("bottom", x_label)
+        ax.setLabel("left", "Counts")
+        ax.setTitle(f"{nw.name} — {nw.n_sel_peaks} selected peak(s)")
+        ax.showGrid(x=True, y=True, alpha=0.3)
         self._ana_canvas.draw_idle()
 
     # ── Analysis: fit_nw ─────────────────────────────────────────
@@ -844,26 +825,20 @@ class AnalysisTab(QWidget):
 
         # Clean up any previous rect selector
         if self._ana_thr_rect_sel is not None:
-            try:
-                self._ana_thr_rect_sel.set_active(False)
-            except Exception:
-                pass
+            self._ana_thr_rect_sel.deactivate()
             self._ana_thr_rect_sel = None
 
         ax = self._ana_canvas.reset_axes()
-        ax.set_axis_on()
         valid = ~np.isnan(values)
-        self._ana_thr_scatter = ax.scatter(
-            power[valid], values[valid], zorder=3, color="steelblue", s=20
-        )
-        ax.set_xlabel("Power (mW)")
-        ax.set_ylabel("Intensity (arb.u.)")
-        ax.set_title(
+        self._ana_thr_scatter = RecolorableScatter(ax, default_color="steelblue", size=8)
+        self._ana_thr_scatter.set_data(power[valid], values[valid])
+        ax.setLabel("bottom", "Power (mW)")
+        ax.setLabel("left", "Intensity (arb.u.)")
+        ax.setTitle(
             f"{title}  ({idx+1}/{n_tot})\n"
-            "Drag rectangle to select ASE region, then Compute threshold"
+            "Drag the rectangle's handles to select the ASE region, then Compute threshold"
         )
-        ax.grid(True, alpha=0.3)
-        self._ana_canvas.fig.tight_layout()
+        ax.showGrid(x=True, y=True, alpha=0.3)
         self._ana_canvas.draw_idle()
 
         # Store current item's data for use in compute/next
@@ -873,16 +848,15 @@ class AnalysisTab(QWidget):
         self._ana_thr_coeffs  = None
         self._ana_thr_title   = title
 
-        from matplotlib.widgets import RectangleSelector
-        self._ana_thr_rect_sel = RectangleSelector(
-            ax,
-            self._ana_on_thr_rect,
-            useblit=False,
-            button=[1],
-            minspanx=0, minspany=0,
-            spancoords="data",
-            interactive=True,
-        )
+        p_arr, v_arr = self._ana_thr_power, self._ana_thr_values
+        if len(p_arr):
+            default_rect = (float(np.min(p_arr)), float(np.min(v_arr)),
+                            float(np.max(p_arr)), float(np.max(v_arr)))
+        else:
+            default_rect = (0.0, 0.0, 1.0, 1.0)
+        self._ana_thr_rect_sel = DraggableRect(ax)
+        self._ana_thr_rect_sel.activate(default_rect)
+        self._ana_thr_rect_sel.sigRectSelected.connect(self._ana_on_thr_rect)
 
         self._ana_action_lbl.setText(f"Threshold {idx+1}/{n_tot}: {title}")
         self._ana_btn_act_done.setVisible(False)
@@ -900,20 +874,17 @@ class AnalysisTab(QWidget):
                 f"Drag to select ASE region for {title}, then Compute threshold."
             )
 
-    def _ana_on_thr_rect(self, eclick, erelease):
-        x0, x1 = sorted([eclick.xdata,  erelease.xdata])
-        y0, y1 = sorted([eclick.ydata,  erelease.ydata])
+    def _ana_on_thr_rect(self, x0, y0, x1, y1):
         p, v = self._ana_thr_power, self._ana_thr_values
         inside = np.where(
             (p >= x0) & (p <= x1) & (v >= y0) & (v <= y1)
         )[0]
         self._ana_thr_sel_pts = inside.tolist()
         # Highlight selected points
-        ax = self._ana_canvas.ax
         colors = ["steelblue"] * len(p)
         for i in self._ana_thr_sel_pts:
             colors[i] = "tomato"
-        self._ana_thr_scatter.set_facecolor(colors)
+        self._ana_thr_scatter.set_point_colors(colors)
         self._ana_canvas.draw_idle()
 
     def _ana_compute_threshold(self):
@@ -963,19 +934,21 @@ class AnalysisTab(QWidget):
         }
 
         # Redraw with fit line
-        ax = self._ana_canvas.ax
+        ax = self._ana_canvas.plot_item
+        ax.addLegend(labelTextSize="8pt")
         x_fit = np.linspace(0, max(p_all) * 1.1, 200)
-        ax.plot(x_fit, np.polyval(coeffs, x_fit), "r-", lw=1.5, label="fit")
+        ax.plot(x_fit, np.polyval(coeffs, x_fit), pen=pg.mkPen("r", width=1.5), name="fit")
         if not np.isnan(thresh):
             err_str = f" ± {thr_err:.2g}" if not np.isnan(thr_err) else ""
-            ax.axvline(thresh, color="black", lw=1.2, linestyle="--",
-                       label=f"Threshold = {thresh:.4g}{err_str} mW")
-        ax.legend(fontsize=8)
-        ax.set_title(
+            thr_line = pg.InfiniteLine(
+                pos=thresh, angle=90, pen=pg.mkPen("black", width=1.2, style=Qt.DashLine),
+                label=f"Threshold = {thresh:.4g}{err_str} mW", labelOpts={"position": 0.95},
+            )
+            ax.addItem(thr_line)
+        ax.setTitle(
             f"{self._ana_thr_title}\n"
             f"Threshold = {thresh:.4g} mW  |  slope = {a:.3g}"
         )
-        self._ana_canvas.fig.tight_layout()
         self._ana_canvas.draw_idle()
         parent = self.parent()
         if parent is not None and hasattr(parent, "statusBar"):
@@ -987,10 +960,7 @@ class AnalysisTab(QWidget):
         if self._ana_mode != "thr_select":
             return
         if self._ana_thr_rect_sel is not None:
-            try:
-                self._ana_thr_rect_sel.set_active(False)
-            except Exception:
-                pass
+            self._ana_thr_rect_sel.deactivate()
             self._ana_thr_rect_sel = None
 
         idx = self._ana_thr_idx + 1
@@ -1002,10 +972,7 @@ class AnalysisTab(QWidget):
 
     def _ana_finish_thresholds(self):
         if self._ana_thr_rect_sel is not None:
-            try:
-                self._ana_thr_rect_sel.set_active(False)
-            except Exception:
-                pass
+            self._ana_thr_rect_sel.deactivate()
             self._ana_thr_rect_sel = None
         self._ana_action_bar.setVisible(False)
         self._ana_mode = "idle"
@@ -1049,17 +1016,21 @@ class AnalysisTab(QWidget):
         if nw is None:
             return
         ax = self._ana_canvas.reset_axes()
-        ax.set_axis_on()
         power   = nw.power
         plotted = False
+        color_idx = 0
+        ax.addLegend(labelTextSize="7pt")
 
         if nw.peak_integral is not None:
             for j in range(nw.n_sel_peaks):
                 vals  = nw.peak_integral[j, :]
                 valid = ~np.isnan(vals)
                 if valid.any():
-                    ax.plot(power[valid], vals[valid], "o-", lw=1.2,
-                            label=f"peak {j+1} integral")
+                    color = TAB10[color_idx % 10]
+                    ax.plot(power[valid], vals[valid], pen=pg.mkPen(color, width=1.2),
+                            symbol="o", symbolSize=6, symbolBrush=color,
+                            name=f"peak {j+1} integral")
+                    color_idx += 1
                     plotted = True
 
         if nw.specsum:
@@ -1068,32 +1039,42 @@ class AnalysisTab(QWidget):
                 valid = ~np.isnan(vals)
                 if valid.any():
                     c = entry["center"]; w = entry["width"]
-                    ax.plot(power[valid], vals[valid], "s--", lw=1.2,
-                            label=f"integrate @ {c:.4g} ±{w/2:.3g}")
+                    color = TAB10[color_idx % 10]
+                    ax.plot(power[valid], vals[valid],
+                            pen=pg.mkPen(color, width=1.2, style=Qt.DashLine),
+                            symbol="s", symbolSize=6, symbolBrush=color,
+                            name=f"integrate @ {c:.4g} ±{w/2:.3g}")
+                    color_idx += 1
                     plotted = True
 
         def _vline(thr, lbl):
             if thr is not None:
                 t = float(np.nanmean(np.atleast_1d(thr)))
                 if not np.isnan(t):
-                    ax.axvline(t, linestyle=":", color="red", lw=1.2, label=lbl)
+                    line = pg.InfiniteLine(
+                        pos=t, angle=90, pen=pg.mkPen("red", width=1.2, style=Qt.DotLine),
+                        label=lbl, labelOpts={"position": 0.95},
+                    )
+                    ax.addItem(line)
 
         _vline(nw.threshold,          "thr (area)")
         _vline(nw.threshold_integral, "thr (int)")
         _vline(nw.threshold_max,      "thr (max)")
 
         if not plotted:
-            ax.text(0.5, 0.5, "No results yet.\nRun Fit or Integrate first.",
-                    ha="center", va="center", transform=ax.transAxes,
-                    fontsize=11, color="#888888")
+            vb = ax.getViewBox()
+            vb.setRange(xRange=(0, 1), yRange=(0, 1), padding=0)
+            vb.setMouseEnabled(x=False, y=False)
+            text = pg.TextItem("No results yet.\nRun Fit or Integrate first.",
+                                color="#888888", anchor=(0.5, 0.5))
+            text.setPos(0.5, 0.5)
+            vb.addItem(text)
         else:
-            ax.set_xlabel("Power (mW)")
-            ax.set_ylabel("Intensity (arb.u.)")
-            ax.set_title(f"{nw.name} — L-L curve")
-            ax.legend(fontsize=7)
-            ax.grid(True, alpha=0.3)
+            ax.setLabel("bottom", "Power (mW)")
+            ax.setLabel("left", "Intensity (arb.u.)")
+            ax.setTitle(f"{nw.name} — L-L curve")
+            ax.showGrid(x=True, y=True, alpha=0.3)
 
-        self._ana_canvas.fig.tight_layout()
         self._ana_canvas.draw_idle()
 
     # ── Save results ─────────────────────────────────────────────

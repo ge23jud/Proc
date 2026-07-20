@@ -10,12 +10,12 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from canvas import _MplCanvas, _COMPACT_BTN_STYLE
+from plotting import (
+    PGCanvas, _COMPACT_BTN_STYLE, MultiLinePlotter, CategoricalScheme,
+    SequentialScheme, LogAlphaRamp, PLASMA, make_pg_toolbar,
+)
 
 _PL_DIR = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "PL Helper")
@@ -176,8 +176,8 @@ class VisualizerTab(QWidget):
         rl = QVBoxLayout(right)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(4)
-        self._vis_canvas  = _MplCanvas(right)
-        self._vis_toolbar = NavigationToolbar2QT(self._vis_canvas, right)
+        self._vis_canvas  = PGCanvas(right)
+        self._vis_toolbar = make_pg_toolbar(self._vis_canvas, right)
         rl.addWidget(self._vis_toolbar)
         rl.addWidget(self._vis_canvas, stretch=1)
         layout.addWidget(right, stretch=1)
@@ -373,65 +373,50 @@ class VisualizerTab(QWidget):
 
         x_is_energy = self._vis_rb_energy.isChecked()
         n_files     = len(self._vis_data)
-        cmap_file   = cm.get_cmap("tab10")
-        cmap_power  = cm.get_cmap("plasma")
-
-        # Log-normalised alpha: low power → 0.25, high power → 1.0
-        p_sorted = sorted(checked_powers)
-        if len(p_sorted) > 1:
-            log_lo = np.log10(max(p_sorted[0],  1e-30))
-            log_hi = np.log10(max(p_sorted[-1], 1e-30))
-            def _alpha(p):
-                t = (np.log10(max(p, 1e-30)) - log_lo) / (log_hi - log_lo + 1e-30)
-                return 0.25 + 0.75 * float(t)
-        else:
-            def _alpha(p):
-                return 1.0
+        p_sorted    = sorted(checked_powers)
 
         ax = self._vis_canvas.reset_axes()
-        ax.set_axis_on()
+        ax.setLogMode(y=self._vis_rb_log.isChecked())
+
+        n_lines = n_files * len(p_sorted)
+        ax.addLegend(labelTextSize=f"{max(4, 7 - n_lines // 5)}pt",
+                     colCount=max(1, n_lines // 20))
+
+        if n_files == 1:
+            mlp = MultiLinePlotter(
+                ax, SequentialScheme(vmin=p_sorted[0], vmax=p_sorted[-1], cmap=PLASMA)
+            )
+        else:
+            # Log-normalised alpha: low power → 0.25, high power → 1.0
+            mlp = MultiLinePlotter(ax, LogAlphaRamp(CategoricalScheme(), p_sorted))
 
         for fi, d in enumerate(self._vis_data):
-            for pi, p_W in enumerate(p_sorted):
+            for p_W in p_sorted:
                 closest = int(np.argmin(np.abs(d["powers_W"] - p_W)))
                 wl      = d["wl"]
                 counts  = d["counts"][:, closest]
                 x       = _HC_EV_NM / wl if x_is_energy else wl
                 s       = np.argsort(x)
 
-                if n_files == 1:
-                    t     = pi / max(len(p_sorted) - 1, 1)
-                    color = cmap_power(t)
-                    alpha = 1.0
-                else:
-                    color = cmap_file(fi % 10)
-                    alpha = _alpha(p_W)
-
                 lbl = f"{d['label']} — {self._vis_fmt_qty(d, closest)}"
-                ax.plot(x[s], counts[s], lw=0.9, color=color,
-                        alpha=alpha, label=lbl)
+                mlp.plot(x[s], counts[s], index=fi, value=p_W, label=lbl, width=0.9)
 
-        ax.set_xlabel("Energy (eV)" if x_is_energy else "Wavelength (nm)")
-        ax.set_ylabel("Counts")
-        ax.set_yscale("log" if self._vis_rb_log.isChecked() else "linear")
-        ax.grid(True, alpha=0.3)
+        ax.setLabel("bottom", "Energy (eV)" if x_is_energy else "Wavelength (nm)")
+        ax.setLabel("left", "Counts")
+        ax.showGrid(x=True, y=True, alpha=0.3)
 
         if not self._vis_xauto.isChecked():
             try:
-                ax.set_xlim(float(self._vis_xmin.text()),
-                            float(self._vis_xmax.text()))
+                ax.setXRange(float(self._vis_xmin.text()),
+                             float(self._vis_xmax.text()), padding=0)
             except ValueError:
                 pass
         if not self._vis_yauto.isChecked():
             try:
-                ax.set_ylim(float(self._vis_ymin.text()),
-                            float(self._vis_ymax.text()))
+                ax.setYRange(float(self._vis_ymin.text()),
+                             float(self._vis_ymax.text()), padding=0)
             except ValueError:
                 pass
 
-        n_lines = n_files * len(p_sorted)
-        ax.legend(fontsize=max(4, 7 - n_lines // 5), loc="best",
-                  ncol=max(1, n_lines // 20))
-        ax.set_title("PL spectra")
-        self._vis_canvas.fig.tight_layout()
+        ax.setTitle("PL spectra")
         self._vis_canvas.draw_idle()
