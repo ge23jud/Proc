@@ -6,6 +6,7 @@ from tabs.stitch     import StitchTab
 from tabs.visualizer import VisualizerTab
 from tabs.analysis   import AnalysisTab
 from tabs.spotsize   import SpotsizeTab
+from tabs.sem        import SemTab
 
 
 class StitchApp(QMainWindow):
@@ -21,9 +22,11 @@ class StitchApp(QMainWindow):
         self._vis_tab       = VisualizerTab(self)
         self._ana_tab       = AnalysisTab(self)
         self._spotsize_tab  = SpotsizeTab(self)
+        self._sem_tab       = SemTab(self)
         tabs.addTab(self._stitch_tab,   "Stitch / Convert")
         tabs.addTab(self._vis_tab,      "Visualizer")
         tabs.addTab(self._ana_tab,      "Analysis")
         tabs.addTab(self._spotsize_tab, "Spotsize")
+        tabs.addTab(self._sem_tab,      "SEM")
         self.setCentralWidget(tabs)
         self.statusBar().showMessage("Ready — add .origin files to begin.")

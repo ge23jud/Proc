@@ -8,16 +8,18 @@
 - **Main window**: `app.py` — `StitchApp(QMainWindow)`, a `QTabWidget` hosting the 4 tabs below.
 - **Platform**: Windows-only PyQt5 app (no PySide/Qt6 constraint otherwise).
 - **GitHub**: https://github.com/ge23jud/Proc.git
-- **Dependencies**: pinned in `requirements.txt` (PyQt5, pyqtgraph, numpy, h5py, scipy, pandas, qt-material). No `pyproject.toml`/`setup.py`.
+- **Dependencies**: pinned in `requirements.txt` (PyQt5, pyqtgraph, numpy, h5py, scipy, pandas, qt-material, opencv-python, Pillow). No `pyproject.toml`/`setup.py`.
 
 ## Tabs (`tabs/`)
 - **`stitch.py`** — "Stitch / Convert": load `.origin` power-series files, preview spectra, pick per-pair overlap "transition spans" (draggable region), dark-spectrum subtraction, power calibration, save as HDF5 or `.origin`.
 - **`visualizer.py`** — "Visualizer": load HDF5 files, overlay PL spectra across files/power steps with configurable axes (log/linear, manual range), colored by file or by power.
 - **`analysis.py`** — "Analysis": peak-picking → fit-window selection → `fit_nw`/`integrate_spectra` (via sibling `nw_analysis.py`) → threshold detection (drag-select ASE region, linear fit, threshold ± error) → L-L curve plot → save results into the HDF5's `analysis` group. A click-driven wizard/state machine (`self._ana_mode`).
 - **`spotsize.py`** — "Spotsize": load an Excel/text beam-scan file, select two spans on the derivative curve, Gaussian-fit the edge, compute the 95.4% width and beam diameter (Δx × sin(angle)).
+- **`sem.py`** — "SEM": nanowire width/height/angle measurement from SEM TIFF images, a Python port of the "smarter SEM" MATLAB toolset (`\\nas.ads.mwn.de\tuze\wsi\e24\SQN\Researchers\Haubmann Benjamin\01_PhD\10_Scripts\smarter SEM`). Three modes: **Automated** (whole-image binarize → contour-trace → `cv2.minAreaRect` fit, with edge/size/tilt rejection rules and a per-image "skip IDs" list, port of `edgeDetect.m`), **Semi-automated** (click near a wire → auto-crop a physical-size window around it → detect the tallest accepted blob in the crop, falling back to a manual 2-click measurement if detection fails or the result is too short, port of `edgeDetect_semiauto.m`), and **Manual** (plain 2-click distance measurement tagged with a measurement-type label, port of `click_on_image.m`/`smarterSEM.m`). All three modes share one results table (exportable to CSV) and a live mean±std stats readout (replacing the separate `getValues.m`/`combined.m` post-processing scripts). Core image-processing logic lives in `sem_utils.py` (root, no PyQt imports); pixel scale is parsed by regex-scanning the TIFF's embedded ASCII metadata footer for `Pixel Size = <value> <unit>` (editable per-image if not found or wrong). Adds `opencv-python` and `Pillow` as dependencies.
 
 ## Shared modules
 - **`io_utils.py`** — pure data I/O: `.origin`/HDF5 read-write, power-calibration parsing. No UI, no plotting.
+- **`sem_utils.py`** — pure image-processing logic for the SEM tab: TIFF+scale reading, blob detection/rectangle-fit, crop, and 2-point measurement. No UI.
 - **Sibling directories** (imported via `sys.path.insert`, not part of this repo):
   - `..\PL Helper\pl.py` — numeric helpers: origin-file parsing, spectrum stitching (`_stitch_counts`), Gaussian fitting, `_HC_EV_NM` (eV↔nm constant).
   - `..\Plot\nw_analysis.py` — `nw_analysis` module (`import nw_analysis as nwa`), used by `analysis.py` for `fit_nw`/`integrate_spectra` on a `SimpleNamespace` "nanowire" object (`_new_nanowire()`). Always called with `show_progress=False` from this app, so its own standalone matplotlib windows (`plt.subplots`/`ginput`) are never triggered — that module's plotting is out of scope for this app.
