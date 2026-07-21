@@ -17,11 +17,6 @@ from plotting import (
     SequentialScheme, LogAlphaRamp, PLASMA, make_pg_toolbar,
 )
 
-_PL_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "PL Helper")
-)
-if _PL_DIR not in sys.path:
-    sys.path.insert(0, _PL_DIR)
 from pl import _HC_EV_NM
 
 

@@ -24,11 +24,6 @@ from io_utils import (
     _parse_power_calibration,
 )
 
-_PL_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "PL Helper")
-)
-if _PL_DIR not in sys.path:
-    sys.path.insert(0, _PL_DIR)
 from pl import (
     _parse_origin_power_series,
     _parse_origin_header,

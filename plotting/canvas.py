@@ -55,7 +55,13 @@ class PGCanvas(pg.GraphicsLayoutWidget):
         return self.plot_item
 
     def draw_idle(self):
-        pass
+        """Force any axis still in auto-range mode to refit its data right
+        now, rather than waiting for pyqtgraph's next paint-triggered
+        recompute (`ViewBox.prepareForPaint`) — which can lag or never fire
+        before the user looks at the plot (e.g. a redraw on a background
+        tab). Axes an explicit setXRange/setYRange already took out of
+        auto-range mode are left untouched."""
+        self.plot_item.getViewBox().updateAutoRange()
 
     def add_colorbar_legend(self, gradient_legend):
         self._remove_legend_widget()
@@ -86,4 +92,12 @@ class PGCanvas(pg.GraphicsLayoutWidget):
         vb.setMouseEnabled(x=False, y=False)
         text = pg.TextItem(self._welcome_msg, color="#666666", anchor=(0.5, 0.5))
         text.setPos(0.5, 0.5)
-        vb.addItem(text)
+        # Added via plot_item.addItem (not vb.addItem) so the next
+        # reset_axes()'s plot_item.clear() actually removes it — added
+        # straight to the ViewBox it survives clear() (clear() only walks
+        # PlotItem's own tracked item list) and its anchor point then leaks
+        # into every future auto-range calculation as a permanent (0.5, 0.5)
+        # data bound, which can dwarf real data far smaller than that and
+        # squash it flat. ignoreBounds=True keeps it out of that calculation
+        # even while it's the only thing showing.
+        self.plot_item.addItem(text, ignoreBounds=True)

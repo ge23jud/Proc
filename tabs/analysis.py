@@ -18,18 +18,8 @@ from plotting import (
     DraggableSpan, DraggableRect, RecolorableScatter, make_pg_toolbar,
 )
 
-_PL_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "PL Helper")
-)
-if _PL_DIR not in sys.path:
-    sys.path.insert(0, _PL_DIR)
 from pl import _HC_EV_NM
 
-_PLOT_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "Plot")
-)
-if _PLOT_DIR not in sys.path:
-    sys.path.insert(0, _PLOT_DIR)
 try:
     import nw_analysis as nwa
     _NWA_AVAILABLE = True
@@ -74,8 +64,7 @@ class AnalysisTab(QWidget):
 
         if not _NWA_AVAILABLE:
             msg = QLabel(
-                f"nw_analysis could not be imported:\n{_NWA_ERROR}\n\n"
-                f"Expected at: {_PLOT_DIR}"
+                f"nw_analysis could not be imported:\n{_NWA_ERROR}"
             )
             msg.setWordWrap(True)
             layout.addWidget(msg)

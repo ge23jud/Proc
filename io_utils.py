@@ -1,17 +1,7 @@
 import os
 import re
-import sys
 import numpy as np
 import h5py
-
-# ------------------------------------------------------------------
-# Import stitching logic from pl.py (sibling directory)
-# ------------------------------------------------------------------
-_PL_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "PL Helper")
-)
-if _PL_DIR not in sys.path:
-    sys.path.insert(0, _PL_DIR)
 
 from pl import _HC_EV_NM
 
