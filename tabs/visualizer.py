@@ -4,11 +4,9 @@ import numpy as np
 import h5py
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QPushButton, QRadioButton, QCheckBox, QListWidget, QListWidgetItem,
-    QLineEdit, QFileDialog, QMessageBox, QSizePolicy, QAbstractItemView,
-    QFrame,
+    QPushButton, QRadioButton, QListWidget, QListWidgetItem,
+    QFileDialog, QMessageBox, QAbstractItemView, QFrame, QDialog,
 )
-from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -16,6 +14,7 @@ from plotting import (
     PGCanvas, _COMPACT_BTN_STYLE, MultiLinePlotter, CategoricalScheme,
     SequentialScheme, LogAlphaRamp, PLASMA, make_pg_toolbar,
 )
+from io_utils import _h5_contents_summary
 
 from pl import _HC_EV_NM
 
@@ -56,74 +55,11 @@ class VisualizerTab(QWidget):
         for b in (self._vis_btn_add, self._vis_btn_remove, self._vis_btn_clear):
             fb.addWidget(b)
         fl.addLayout(fb)
+        self._vis_btn_show_data = QPushButton("Show Data")
+        self._vis_btn_show_data.clicked.connect(self._vis_on_show_data)
+        fl.addWidget(self._vis_btn_show_data)
         g_files.setStyleSheet(_COMPACT_BTN_STYLE)
-        sl.addWidget(g_files)
-
-        # Powers group
-        g_powers = QGroupBox("Power steps")
-        pl = QVBoxLayout(g_powers)
-        self._vis_power_list = QListWidget()
-        self._vis_power_list.setToolTip("Check power steps to display")
-        pl.addWidget(self._vis_power_list, stretch=1)
-        pb = QHBoxLayout()
-        vis_btn_all  = QPushButton("All")
-        vis_btn_none = QPushButton("None")
-        vis_btn_all.clicked.connect(self._vis_check_all_powers)
-        vis_btn_none.clicked.connect(self._vis_check_none_powers)
-        pb.addWidget(vis_btn_all)
-        pb.addWidget(vis_btn_none)
-        pl.addLayout(pb)
-        sl.addWidget(g_powers, stretch=1)
-
-        # X axis group
-        g_xaxis = QGroupBox("X axis")
-        xl = QVBoxLayout(g_xaxis)
-        xr = QHBoxLayout()
-        self._vis_rb_energy = QRadioButton("Energy (eV)")
-        self._vis_rb_wl     = QRadioButton("Wavelength (nm)")
-        self._vis_rb_energy.setChecked(True)
-        xr.addWidget(self._vis_rb_energy)
-        xr.addWidget(self._vis_rb_wl)
-        xl.addLayout(xr)
-        self._vis_xauto = QCheckBox("Auto range")
-        self._vis_xauto.setChecked(True)
-        xl.addWidget(self._vis_xauto)
-        xrl = QHBoxLayout()
-        xrl.addWidget(QLabel("Min:"))
-        self._vis_xmin = QLineEdit()
-        self._vis_xmin.setEnabled(False)
-        xrl.addWidget(self._vis_xmin)
-        xrl.addWidget(QLabel("Max:"))
-        self._vis_xmax = QLineEdit()
-        self._vis_xmax.setEnabled(False)
-        xrl.addWidget(self._vis_xmax)
-        xl.addLayout(xrl)
-        sl.addWidget(g_xaxis)
-
-        # Y axis group
-        g_yaxis = QGroupBox("Y axis")
-        yl = QVBoxLayout(g_yaxis)
-        yr = QHBoxLayout()
-        self._vis_rb_linear = QRadioButton("Linear")
-        self._vis_rb_log    = QRadioButton("Log")
-        self._vis_rb_linear.setChecked(True)
-        yr.addWidget(self._vis_rb_linear)
-        yr.addWidget(self._vis_rb_log)
-        yl.addLayout(yr)
-        self._vis_yauto = QCheckBox("Auto range")
-        self._vis_yauto.setChecked(True)
-        yl.addWidget(self._vis_yauto)
-        yrl = QHBoxLayout()
-        yrl.addWidget(QLabel("Min:"))
-        self._vis_ymin = QLineEdit()
-        self._vis_ymin.setEnabled(False)
-        yrl.addWidget(self._vis_ymin)
-        yrl.addWidget(QLabel("Max:"))
-        self._vis_ymax = QLineEdit()
-        self._vis_ymax.setEnabled(False)
-        yrl.addWidget(self._vis_ymax)
-        yl.addLayout(yrl)
-        sl.addWidget(g_yaxis)
+        sl.addWidget(g_files, stretch=1)
 
         # Legend quantity group
         g_qty = QGroupBox("Legend quantity")
@@ -139,15 +75,6 @@ class VisualizerTab(QWidget):
         sl.addWidget(g_qty)
 
         # Wire controls → auto replot
-        self._vis_rb_energy.toggled.connect(lambda _: self._vis_plot())
-        self._vis_rb_linear.toggled.connect(lambda _: self._vis_plot())
-        self._vis_xauto.toggled.connect(self._vis_on_xauto_toggled)
-        self._vis_yauto.toggled.connect(self._vis_on_yauto_toggled)
-        self._vis_xmin.returnPressed.connect(self._vis_plot)
-        self._vis_xmax.returnPressed.connect(self._vis_plot)
-        self._vis_ymin.returnPressed.connect(self._vis_plot)
-        self._vis_ymax.returnPressed.connect(self._vis_plot)
-        self._vis_power_list.itemChanged.connect(self._vis_plot)
         self._vis_rb_qty_power.toggled.connect(lambda _: self._vis_plot())
         self._vis_rb_qty_density.toggled.connect(lambda _: self._vis_plot())
         self._vis_rb_qty_fluence.toggled.connect(lambda _: self._vis_plot())
@@ -193,7 +120,6 @@ class VisualizerTab(QWidget):
                     item = QListWidgetItem(d["label"])
                     item.setToolTip(p)
                     self._vis_file_list.addItem(item)
-        self._vis_refresh_powers()
         self._vis_plot()
 
     def _vis_load_file(self, path: str):
@@ -261,17 +187,44 @@ class VisualizerTab(QWidget):
             self._vis_file_list.takeItem(row)
             self._vis_files.pop(row)
             self._vis_data.pop(row)
-        self._vis_refresh_powers()
         self._vis_plot()
 
     def _vis_on_clear(self):
         self._vis_files.clear()
         self._vis_data.clear()
         self._vis_file_list.clear()
-        self._vis_power_list.clear()
         self._vis_canvas._welcome()
 
-    # ── Visualizer: power list ───────────────────────────────────
+    def _vis_on_show_data(self):
+        row = self._vis_file_list.currentRow()
+        if row < 0 or row >= len(self._vis_files):
+            QMessageBox.information(self, "No selection",
+                                    "Select a file in the list first.")
+            return
+        path = self._vis_files[row]
+        try:
+            lines = _h5_contents_summary(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Read error",
+                                 f"Could not read:\n{path}\n\n{exc}")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Data in {os.path.basename(path)}")
+        dlg.resize(560, 420)
+        dl = QVBoxLayout(dlg)
+        listw = QListWidget()
+        mono = QFont("Consolas")
+        listw.setFont(mono)
+        for line in lines:
+            listw.addItem(QListWidgetItem(line))
+        dl.addWidget(listw)
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(dlg.accept)
+        dl.addWidget(btn_close)
+        dlg.exec_()
+
+    # ── Visualizer: legend quantity ──────────────────────────────
 
     @staticmethod
     def _vis_fmt_power(p_W: float) -> str:
@@ -300,78 +253,22 @@ class VisualizerTab(QWidget):
             return self._vis_fmt_power(cal[idx])
         return self._vis_fmt_power(d["powers_W"][idx])
 
-    def _vis_refresh_powers(self):
-        prev_checked = set()
-        for i in range(self._vis_power_list.count()):
-            item = self._vis_power_list.item(i)
-            if item.checkState() == Qt.Checked:
-                prev_checked.add(item.data(Qt.UserRole))
-        first_load = self._vis_power_list.count() == 0
-
-        all_powers = sorted(set(
-            float(p) for d in self._vis_data for p in d["powers_W"]
-        ))
-
-        self._vis_power_list.blockSignals(True)
-        self._vis_power_list.clear()
-        for p_W in all_powers:
-            item = QListWidgetItem(self._vis_fmt_power(p_W))
-            item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
-            item.setCheckState(
-                Qt.Checked if (first_load or p_W in prev_checked) else Qt.Unchecked
-            )
-            item.setData(Qt.UserRole, p_W)
-            self._vis_power_list.addItem(item)
-        self._vis_power_list.blockSignals(False)
-
-    def _vis_check_all_powers(self):
-        self._vis_power_list.blockSignals(True)
-        for i in range(self._vis_power_list.count()):
-            self._vis_power_list.item(i).setCheckState(Qt.Checked)
-        self._vis_power_list.blockSignals(False)
-        self._vis_plot()
-
-    def _vis_check_none_powers(self):
-        self._vis_power_list.blockSignals(True)
-        for i in range(self._vis_power_list.count()):
-            self._vis_power_list.item(i).setCheckState(Qt.Unchecked)
-        self._vis_power_list.blockSignals(False)
-        self._vis_plot()
-
-    # ── Visualizer: axis range toggles ──────────────────────────
-
-    def _vis_on_xauto_toggled(self, checked: bool):
-        self._vis_xmin.setEnabled(not checked)
-        self._vis_xmax.setEnabled(not checked)
-        self._vis_plot()
-
-    def _vis_on_yauto_toggled(self, checked: bool):
-        self._vis_ymin.setEnabled(not checked)
-        self._vis_ymax.setEnabled(not checked)
-        self._vis_plot()
-
     # ── Visualizer: plot ─────────────────────────────────────────
 
     def _vis_plot(self):
         if not self._vis_data:
             return
 
-        checked_powers = [
-            self._vis_power_list.item(i).data(Qt.UserRole)
-            for i in range(self._vis_power_list.count())
-            if self._vis_power_list.item(i).checkState() == Qt.Checked
-        ]
-        if not checked_powers:
+        n_files  = len(self._vis_data)
+        p_sorted = sorted(set(
+            float(p) for d in self._vis_data for p in d["powers_W"]
+        ))
+        if not p_sorted:
             self._vis_canvas.reset_axes()
             self._vis_canvas.draw_idle()
             return
 
-        x_is_energy = self._vis_rb_energy.isChecked()
-        n_files     = len(self._vis_data)
-        p_sorted    = sorted(checked_powers)
-
         ax = self._vis_canvas.reset_axes()
-        ax.setLogMode(y=self._vis_rb_log.isChecked())
 
         n_lines = n_files * len(p_sorted)
         ax.addLegend(labelTextSize=f"{max(4, 7 - n_lines // 5)}pt",
@@ -390,28 +287,14 @@ class VisualizerTab(QWidget):
                 closest = int(np.argmin(np.abs(d["powers_W"] - p_W)))
                 wl      = d["wl"]
                 counts  = d["counts"][:, closest]
-                x       = _HC_EV_NM / wl if x_is_energy else wl
+                x       = _HC_EV_NM / wl
                 s       = np.argsort(x)
 
                 lbl = f"{d['label']} — {self._vis_fmt_qty(d, closest)}"
                 mlp.plot(x[s], counts[s], index=fi, value=p_W, label=lbl, width=0.9)
 
-        ax.setLabel("bottom", "Energy (eV)" if x_is_energy else "Wavelength (nm)")
+        ax.setLabel("bottom", "Energy (eV)")
         ax.setLabel("left", "Counts")
         ax.showGrid(x=True, y=True, alpha=0.3)
-
-        if not self._vis_xauto.isChecked():
-            try:
-                ax.setXRange(float(self._vis_xmin.text()),
-                             float(self._vis_xmax.text()), padding=0)
-            except ValueError:
-                pass
-        if not self._vis_yauto.isChecked():
-            try:
-                ax.setYRange(float(self._vis_ymin.text()),
-                             float(self._vis_ymax.text()), padding=0)
-            except ValueError:
-                pass
-
         ax.setTitle("PL spectra")
         self._vis_canvas.draw_idle()

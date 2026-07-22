@@ -6,6 +6,83 @@ import h5py
 from pl import _HC_EV_NM
 
 
+def _read_h5_spectrum(path):
+    """Read Energy, counts, and per-power-step pump fluence from an HDF5
+    spectrum file written by _write_h5_file().
+
+    Returns dict: label, path, energy (eV, n_wl), counts (n_wl, n_powers),
+    pump_fluence (mJ/cm^2, n_powers) | None if the file has no Pump_fluence
+    dataset (i.e. it was saved without a spot diameter), power_mW (n_powers).
+    """
+    with h5py.File(path, "r") as f:
+        if "Energy" in f:
+            energy = f["Energy"][:]
+        elif "Wavelength" in f:
+            energy = _HC_EV_NM / f["Wavelength"][:]
+        elif "wavelength_nm" in f:
+            energy = _HC_EV_NM / f["wavelength_nm"][:]
+        else:
+            raise ValueError("No Energy/Wavelength dataset found.")
+
+        if "SpectraDiff" in f:
+            counts = f["SpectraDiff"][:]
+        elif "Spectra_raw" in f:
+            counts = f["Spectra_raw"][:]
+        elif "counts" in f:
+            counts = f["counts"][:]
+        else:
+            raise ValueError("No spectra dataset found.")
+
+        pwr_ds = f["Power_uncalibrated"] if "Power_uncalibrated" in f else f.get("powers_W")
+        if pwr_ds is not None:
+            power_mW = pwr_ds[:].astype(float)
+            if pwr_ds.attrs.get("units", "mW") == "W":
+                power_mW = power_mW * 1e3
+        else:
+            power_mW = np.arange(1, counts.shape[1] + 1, dtype=float)
+
+        if "Pump_fluence" in f:
+            fl_ds = f["Pump_fluence"]
+            pump_fluence = fl_ds[:].astype(float)
+            if fl_ds.attrs.get("units", "mJ/cm^2") in ("uJ/cm^2", "µJ/cm^2"):
+                pump_fluence = pump_fluence * 1e-3
+        else:
+            pump_fluence = None
+
+    order = np.argsort(energy)
+    return {
+        "label":        os.path.splitext(os.path.basename(path))[0],
+        "path":         path,
+        "energy":       energy[order],
+        "counts":       counts[order],
+        "pump_fluence": pump_fluence,
+        "power_mW":     power_mW,
+    }
+
+
+def _h5_contents_summary(path):
+    """Return a flat list of human-readable strings describing every
+    dataset/group and root attribute in an HDF5 file, for the Visualizer
+    tab's "Show Data" inspector.
+    """
+    lines = []
+    with h5py.File(path, "r") as f:
+        def _visit(name, obj):
+            if isinstance(obj, h5py.Dataset):
+                units = obj.attrs.get("units")
+                units_str = f"  [{units}]" if units else ""
+                lines.append(f"{name}   shape={obj.shape}  dtype={obj.dtype}{units_str}")
+            else:
+                lines.append(f"{name}/   (group)")
+        f.visititems(_visit)
+        if f.attrs:
+            lines.append("")
+            lines.append("— attributes —")
+            for k, v in f.attrs.items():
+                lines.append(f"{k}: {v}")
+    return lines
+
+
 def _parse_header_center_disp(hdr):
     """Extract (center_nm, disp_nm) from raw_header_lines[5] and [6].
 
@@ -118,7 +195,9 @@ def _write_h5_file(output_path, wl_out, counts_diff, counts_raw, header_meta,
     Root attrs: format_version, stitched, date_str, int_time_str,
                 center_nm, center_eV, dispersion_nm, dispersion_eV,
                 spot_diameter_um (optional), rep_rate_mhz (optional),
-                header_line_0 … header_line_8
+                plus one attribute per raw header line, named after its
+                label (e.g. "Measurement type", "Integration time") rather
+                than a generic header_line_N key — see the loop below.
     """
     # Accept wl_out in nm (> 50) or eV (< 50); always save as eV.
     if float(wl_out.min()) < 50.0:          # already eV
@@ -196,7 +275,13 @@ def _write_h5_file(output_path, wl_out, counts_diff, counts_raw, header_meta,
         if rep_rate_mhz is not None:
             f.attrs["rep_rate_mhz"] = float(rep_rate_mhz)
         for i, line in enumerate(raw[:9]):
-            f.attrs[f"header_line_{i}"] = line.rstrip("\r\n")
+            line = line.rstrip("\r\n")
+            label, sep, value = line.partition("\t")
+            key = label.strip().rstrip(":").strip() if sep else ""
+            if key:
+                f.attrs[key] = value.strip()
+            else:
+                f.attrs[f"header_line_{i}"] = line
 
         # ── Source spectra (stitched files only) ───────────────────
         if stitched and source_datasets:

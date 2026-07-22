@@ -66,10 +66,10 @@ class StitchTab(QWidget):
         # ── Left sidebar (scrollable so content is never squeezed or
         #    overlapping if it doesn't fit the window height) ────────
         scroll = QScrollArea()
-        # Widen by the scrollbar's own thickness so the 270px content column
+        # Widen by the scrollbar's own thickness so the 340px content column
         # keeps its full width instead of being squeezed by the scrollbar.
         scrollbar_w = scroll.style().pixelMetric(QStyle.PM_ScrollBarExtent)
-        scroll.setFixedWidth(270 + scrollbar_w)
+        scroll.setFixedWidth(340 + scrollbar_w)
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         sidebar = QWidget()
@@ -1010,8 +1010,10 @@ class StitchTab(QWidget):
         is_stitched  = len(ds) > 1
         n_dark       = sum(1 for v in dark_by_label.values() if v is not None)
 
+        first_name = os.path.splitext(os.path.basename(ds[0]["path"]))[0]
+        default_path = os.path.join(os.path.dirname(ds[0]["path"]), first_name + ".h5")
         out_path, _ = QFileDialog.getSaveFileName(
-            self, "Save as HDF5", "",
+            self, "Save as HDF5", default_path,
             "HDF5 files (*.h5);;All files (*.*)"
         )
         if not out_path:
